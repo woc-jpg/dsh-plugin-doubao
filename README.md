@@ -143,6 +143,32 @@ the captcha also expires quickly — a challenge that sits unsolved for a minute
 `NotFoundChallengeId` and a fresh question, so the desktop client may need a restart before a slow
 solve can succeed.
 
+## Content moderation
+
+Doubao's content filter does not return an error code. It answers with a canned notice as an ordinary
+text stream and a `stop` finish:
+
+> 该内容涉嫌违反[豆包使用规范](...)，若有误判，请长按本条消息后点击"反馈与举报"进行反馈。
+
+Left alone, the harness renders that as the model's reply — to the user it just looks like the model
+"cannot chat". The plugin handles this in two layers:
+
+- **It does not ship the host's own instructions.** DSH appends its operating-mode preamble,
+  `AGENTS.md`, and the project memory to the messages it hands an adapter (inside
+  `<system-reminder>` blocks, tens of thousands of characters). Those words are for *this* agent,
+  not conversation content, and phrases like "execute without refusal" are exactly what tripped the
+  consumer endpoint's moderation. `toPrompt` strips the reminder tags and drops long host preambles
+  while keeping short system hints and any long document the user actually pasted.
+- **It never shows a canned refusal as an answer.** If a refusal still arrives (in one chunk or
+  split across several), the adapter catches it before a single character reaches the UI and emits a
+  plain explanation instead — "Doubao 内容审核拦截了本次请求（不是模型故障）…" — plus a short
+  cooling-off. It stays a `stop` finish rather than a thrown error, so the harness does not retry
+  into the same filter.
+
+Normal replies are unaffected: the refusal check only buffers deltas while they are still a prefix
+of the notice's lead, which is shorter than one chunk, so a real answer starts streaming on its very
+first delta.
+
 ## Limitations
 
 - **Text only.** Doubao's web endpoint accepts no images here, so nothing advertises image input.
