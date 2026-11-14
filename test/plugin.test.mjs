@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'nod
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-import { Pacer, parseFrames, textOf, buildQuery, buildBody, resolveModel, MODELS } from '../lib/doubao.js'
+import { Pacer, parseFrames, textOf, buildQuery, buildBody, resolveModel, findModel, MODELS } from '../lib/doubao.js'
 import { createAdapter, toPrompt, finishReasonFor, DEFAULT_PROVIDER } from '../lib/adapter.js'
 import { scanLocalStorage, toIdentity, findClientIdentity, credentialPath } from '../lib/identity.js'
 import { readCredentials, writeCredentials, parseHint, credentialsPath } from '../lib/login.js'
@@ -305,13 +305,58 @@ test('buildQuery carries the identity pair the risk engine checks', () => {
   assert.equal(query.get('aid'), '582478')
 })
 
-test('buildBody selects the model by key, and only person-* models use agent_mode 2', () => {
-  const normal = buildBody('hi', { model: 'doubao' })
-  assert.equal(normal.option.model_config.model_item_key, '0')
-  assert.equal(normal.option.need_deep_think, 0)
-  const person = buildBody('hi', { model: 'glm-5.3' })
-  assert.equal(person.option.model_config.model_item_key, 'person-glm-5-3-261111')
-  assert.equal(resolveModel('nope').id, 'doubao', 'unknown ids fall back rather than crash')
+test('buildBody writes the routing tuple into all three places the server reads', () => {
+  const body = buildBody('hi', { model: 'glm-5.3' })
+  const { option, ext } = body
+  // The same five values appear in conversation_init_ext, model_config and
+  // aggregate_params; the server reads whichever copy it likes, so a mismatch
+  // between them silently downgrades the request.
+  assert.equal(option.conversation_init_ext.model_item_key, 'person-glm-5-3-261111')
+  assert.equal(option.model_config.model_item_key, 'person-glm-5-3-261111')
+  assert.equal(option.aggregate_params.model_item_key, 'person-glm-5-3-261111')
+  assert.equal(option.conversation_init_ext.mode_id, '3')
+  assert.equal(option.aggregate_params.mode_id, '3')
+  assert.equal(option.conversation_init_ext.reasoning_effort, '3')
+  assert.equal(option.aggregate_params.reasoning_effort, '3')
+  assert.equal(option.aggregate_params.agent_mode, '1')
+  assert.equal(option.aggregate_params.conversation_mode, '3')
+  assert.equal(option.agent_mode, 1)
+  assert.equal(option.conversation_mode, 3)
+  assert.equal(ext.agent_mode, '1')
+  assert.equal(option.need_deep_think, 8)
+  assert.equal(ext.use_deep_think, '8')
+})
+
+test('the chat-surface models still honour the harness thinking switch', () => {
+  const off = buildBody('hi', { model: 'doubao', think: false })
+  assert.equal(off.option.need_deep_think, 0)
+  assert.equal(off.ext.use_deep_think, '0')
+  const on = buildBody('hi', { model: 'doubao', think: true })
+  assert.equal(on.option.need_deep_think, 1)
+  assert.equal(on.ext.use_deep_think, '1')
+  // A routed model ignores it: its own deepThink id is the model definition.
+  const routed = buildBody('hi', { model: 'glm-5.3', think: false })
+  assert.equal(routed.option.need_deep_think, 8)
+})
+
+test('every model carries a complete routing tuple', () => {
+  for (const model of MODELS) {
+    assert.ok(model.key, `${model.id} needs a model_item_key`)
+    assert.ok(['1', '3'].includes(model.modeId), `${model.id} needs a known mode_id`)
+    assert.ok([1, 2].includes(model.agentMode), `${model.id} needs a known agent_mode`)
+    assert.ok([1, 3].includes(model.convMode), `${model.id} needs a known conversation_mode`)
+    assert.ok(Number.isInteger(model.effort), `${model.id} needs a numeric reasoning_effort`)
+    assert.ok(Number.isInteger(model.deepThink), `${model.id} needs a numeric deep_think id`)
+  }
+  assert.equal(new Set(MODELS.map((m) => m.id)).size, MODELS.length, 'model ids must be unique')
+  assert.equal(new Set(MODELS.map((m) => m.key)).size, MODELS.length, 'model_item_keys must be unique')
+})
+
+test('the legacy aliases resolve to the models they used to be', () => {
+  assert.equal(findModel('doubao-think').id, 'doubao-expert')
+  assert.equal(findModel('doubao-pro').id, 'doubao')
+  assert.equal(findModel('nope'), undefined, 'unknown ids are reported as unknown')
+  assert.equal(resolveModel('nope').id, 'doubao', 'but the permissive lookup falls back rather than crash')
 })
 
 // ---------------------------------------------------------------------- identity

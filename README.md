@@ -7,13 +7,28 @@ provider. Install the plugin, sign in once by scanning a QR code with the Douyin
 There is no proxy to start and no browser to drive. The plugin speaks the same HTTP endpoints the
 web client uses, from inside the harness process.
 
+Every model the client can route to is exposed, with the same names the client shows:
+
 ```
-doubao          Doubao
-doubao-think    Doubao (thinking)
-doubao-expert   Doubao Expert
-kimi-k3.1-pro   Kimi K3.1 Pro
-glm-5.3         GLM 5.3
+doubao                      Doubao
+doubao-expert               Doubao Expert
+doubao-auto                 Doubao Auto
+doubao-2.1-lite             Doubao 2.1 Lite
+doubao-2.1-pro              Doubao 2.1 Pro
+deepseek-v4.1-flash         DeepSeek V4.1 Flash
+deepseek-v4-pro             DeepSeek V4 Pro
+kimi-k3.1-pro               Kimi K3.1 Pro
+kimi-k3.1-pro-highspeed     Kimi K3.1 Pro Highspeed
+kimi-k3                      Kimi K3
+glm-5.3                     GLM 5.3
+glm-5.3-flash               GLM 5.3 Flash
 ```
+
+Picking one is not just a name. The client sends a five-tuple — `model_item_key`, `mode_id`,
+`agent_mode`, `conversation_mode`, `reasoning_effort` (plus a thinking-mode id) — and repeats it in
+three places in the request body. The server reads whichever copy it wants, so a field left at the
+default silently answers from the plain chat model instead of the one you picked. All twelve are
+verified against a live account.
 
 ## Install
 
@@ -121,6 +136,10 @@ solve can succeed.
   the plugin flattens the conversation into a single prompt instead.
 - **Token counts are estimates.** The endpoint returns no usage block, so counts are derived from
   character length (roughly two characters per token). Good enough for a meter, not for billing.
+- **The thinking toggle only reaches the chat models.** `doubao` and `doubao-expert` take a
+  `need_deep_think` flag, so the harness reasoning setting applies to them. For the routed models the
+  thinking depth is part of the model definition — `GLM 5.3` is not `GLM 5.3` with thinking off — so
+  the flag is fixed and the reasoning selector does nothing.
 - **No conversation continuity.** Each turn is a fresh conversation on Doubao's side, because the
   endpoint is stateless per request and passing a conversation id back would require server-side state
   the harness does not give the adapter.
