@@ -1,0 +1,13 @@
+# dsh-plugin-doubao bundle patch.
+#
+# Mounts one entry. It registers itself as an LLM provider ("doubao" by default),
+# so it owns its own model list — there is nothing to declare in the profile and no
+# local server to start.
+#
+# If something else already claims the "doubao" provider id, change it here:
+#   config:
+#     providerId: doubao-personal
+- insert:
+    - id: doubao
+      name: dsh-plugin-doubao
+      config: {}
