@@ -30,6 +30,20 @@ three places in the request body. The server reads whichever copy it wants, so a
 default silently answers from the plain chat model instead of the one you picked. All twelve are
 verified against a live account.
 
+### Credit multipliers
+
+Like the WorkBuddy provider, each model name carries its credit multiplier on the right, separated
+by a middle dot — `Doubao 2.1 Pro · x0.65`, `Kimi K3.1 Pro Highspeed · x1.44`. Promo tags ride
+along too (`x0.01 限时优惠`, `小额免费`). The suffix goes on `name` rather than `description`
+because DSH's model seat and `/model` popup render only `name`; routing still uses `id`, so this is
+display-only and cannot change which model answers.
+
+The table is read live from the client's `action_bar_v3/brief_list` endpoint at most once every ten
+minutes, with a snapshot from 2026-11-14 as the seed so the picker is informative even before the
+first lookup (or if it fails). A failed lookup returns "nothing new" instead of restoring the seed,
+so a fresher rate is never rolled back to an older one. `Doubao` and `Doubao Expert` have no tag in
+the client's own list and are shown without a suffix.
+
 ## Install
 
 Straight from this repository — no npm release needed, since `pnpm` resolves a git URL directly:
@@ -167,6 +181,7 @@ node -e "import('./lib/identity.js').then(m => console.log(m.toIdentity(m.findCl
 | `lib/doubao.js` | The wire protocol: query/body shaping, SSE framing, the turn pacer. |
 | `lib/identity.js` | Reads `device_id` and friends out of the installed client's `Local State`. |
 | `lib/adapter.js` | The LLM provider: model catalog, stream mapping, error mapping. |
+| `lib/rates.js` | Reads the credit multipliers from Doubao's model-list endpoint. |
 | `lib/login.js` | QR sign-in page, cookie harvest, credential storage. |
 | `lib/index.js` | `apply()`: registers the provider and the `doubao` service. |
 | `bin/login.js` | The `dsh-plugin-doubao` command. |

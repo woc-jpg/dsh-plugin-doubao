@@ -5,7 +5,8 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { Pacer, parseFrames, textOf, buildQuery, buildBody, resolveModel, findModel, MODELS } from '../lib/doubao.js'
-import { createAdapter, toPrompt, finishReasonFor, DEFAULT_PROVIDER } from '../lib/adapter.js'
+import { createAdapter, toPrompt, finishReasonFor, DEFAULT_PROVIDER, withRate, RATE_SEPARATOR } from '../lib/adapter.js'
+import { FALLBACK_RATES, rateFromTags, ratesFromBrief, fetchModelRates } from '../lib/rates.js'
 import { scanLocalStorage, toIdentity, findClientIdentity, credentialPath } from '../lib/identity.js'
 import { readCredentials, writeCredentials, parseHint, credentialsPath } from '../lib/login.js'
 
@@ -78,6 +79,120 @@ test('providerInfo agrees with the provider id it is asked about', () => {
   assert.equal(adapter.providerInfo(DEFAULT_PROVIDER).id, DEFAULT_PROVIDER)
   assert.ok(adapter.providerInfo(DEFAULT_PROVIDER).name.length > 0)
 })
+
+// --------------------------------------------------------------- rate display
+
+test('rateFromTags turns the client tags into a compact suffix', () => {
+  assert.equal(rateFromTags([{ text: '0.65x' }]), 'x0.65')
+  assert.equal(rateFromTags([{ text: '限时优惠 0.01x' }]), 'x0.01 限时优惠')
+  assert.equal(rateFromTags([{ text: '小额免费' }]), '小额免费')
+  assert.equal(rateFromTags([{ text: '0.5x' }, { text: '夜间折扣' }]), 'x0.5 · 夜间折扣')
+  assert.equal(rateFromTags([]), undefined)
+  assert.equal(rateFromTags([{ text: '   ' }]), undefined)
+})
+
+test('ratesFromBrief walks nested model rows and keys them by model_item_key', () => {
+  const payload = {
+    data: {
+      entry_list: [{
+        item_list: [
+          { model_item_key: '5', tag_list: [{ text: '0.65x' }] },
+          { model_item_key: '9', tag_list: [{ text: '小额免费' }] },
+          { model_item_key: '0', tag_list: [] },
+        ],
+      }],
+    },
+  }
+  assert.deepEqual(ratesFromBrief(payload), { '5': 'x0.65', '9': '小额免费' })
+})
+
+test('withRate puts the rate after the name, where the model seat reads it', () => {
+  assert.equal(withRate('Kimi K3.1 Pro', 'x0.95'), `Kimi K3.1 Pro${RATE_SEPARATOR}x0.95`)
+  assert.equal(withRate('Doubao', undefined), 'Doubao')
+})
+
+test('the catalog shows the last known rate on the name, not the description', async () => {
+  const adapter = createAdapter({ loadCredentials: async () => undefined })
+  const models = await adapter.listModels()
+  for (const model of models) {
+    const wire = MODELS.find((entry) => entry.id === model.id)
+    const rate = FALLBACK_RATES[wire.key]
+    if (rate) {
+      assert.equal(model.name, `${wire.name}${RATE_SEPARATOR}${rate}`)
+      assert.equal(model.description, wire.description, 'description stays pure; the rate is display-only')
+    } else {
+      assert.equal(model.name, wire.name)
+    }
+  }
+  const resolved = await adapter.resolveModel(DEFAULT_PROVIDER, 'doubao-2.1-pro')
+  assert.equal(resolved.name, `Doubao 2.1 Pro${RATE_SEPARATOR}x0.65`)
+  const prepared = await adapter.prepareCall(DEFAULT_PROVIDER, 'doubao-2.1-pro')
+  assert.equal(prepared.model.name, resolved.name, 'prepareCall must carry the same display name')
+})
+
+test('a live rate lookup replaces the fallback table once', async () => {
+  let calls = 0
+  const adapter = createAdapter({
+    loadCredentials: async () => ({ cookies: 'a=b', identity: IDENTITY }),
+    fetchRates: async () => {
+      calls += 1
+      return { '5': 'x0.42' }
+    },
+  })
+  const first = await adapter.listModels()
+  assert.equal(calls, 1)
+  assert.equal(first.find((m) => m.id === 'doubao-2.1-pro').name, 'Doubao 2.1 Pro · x0.42')
+  assert.deepEqual(adapter.currentRates(), { '5': 'x0.42' })
+
+  // A second call inside the ten-minute window must not hit the endpoint again:
+  // hammering the rate service is precisely what this plugin must not do.
+  await adapter.resolveModel(DEFAULT_PROVIDER, 'doubao-2.1-pro')
+  await adapter.prepareCall(DEFAULT_PROVIDER, 'doubao-2.1-pro')
+  assert.equal(calls, 1)
+})
+
+test('a failed rate lookup keeps the picker informative', async () => {
+  const adapter = createAdapter({
+    loadCredentials: async () => ({ cookies: 'a=b', identity: IDENTITY }),
+    fetchRates: async () => ({}),
+  })
+  const models = await adapter.listModels()
+  assert.equal(models.find((m) => m.id === 'glm-5.3').name, 'GLM 5.3 · x0.80')
+})
+
+test('a live lookup never clobbers a known rate with the fallback snapshot', async () => {
+  const adapter = createAdapter({
+    loadCredentials: async () => ({ cookies: 'a=b', identity: IDENTITY }),
+    fetchRates: async () => ({}),
+  })
+  const before = await adapter.listModels()
+  assert.equal(before.find((m) => m.id === 'kimi-k3').name, 'Kimi K3 · x1.48')
+  assert.deepEqual(adapter.currentRates(), FALLBACK_RATES)
+})
+
+test('fetchModelRates reports a transport failure as "nothing new"', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = async () => { throw new Error('network down') }
+  try {
+    const rates = await fetchModelRates({ identity: IDENTITY, cookies: 'a=b' })
+    assert.deepEqual(rates, {}, 'an empty table means the caller keeps what it last showed')
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('fetchModelRates reports an untagged payload as "nothing new"', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ data: {} }) })
+  try {
+    const rates = await fetchModelRates({ identity: IDENTITY, cookies: 'a=b' })
+    assert.deepEqual(rates, {})
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+// --------------------------------------------------------------- retry policy
 
 test('the retry policy refuses to retry a risk-control refusal', () => {
   const adapter = createAdapter({ loadCredentials: async () => undefined })
