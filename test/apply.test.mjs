@@ -105,7 +105,9 @@ test('the provider id is configurable, and config reaches the adapter', async ()
 test('resolveConfig falls through to defaults and honours overrides', () => {
   const defaults = resolveConfig({})
   assert.equal(defaults.providerId, 'doubao')
-  assert.equal(defaults.minIntervalMs, 6000)
+  // Small on purpose: the pacer holds its lock for the whole turn, so this is
+  // also the floor between two questions, and 6000 was felt as lag.
+  assert.equal(defaults.minIntervalMs, 1500)
   assert.ok(defaults.credentialsPath.endsWith('credentials.json'))
   const custom = resolveConfig({ providerId: 'x', minIntervalMs: 1, credentialsPath: 'C:/c.json', loginPort: 1234 })
   assert.deepEqual(

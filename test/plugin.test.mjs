@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'nod
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-import { Pacer, parseFrames, textOf, buildQuery, buildBody, resolveModel, findModel, MODELS } from '../lib/doubao.js'
+import { Pacer, parseFrames, textOf, createTextTracker, buildQuery, buildBody, resolveModel, findModel, MODELS } from '../lib/doubao.js'
 import { createAdapter, toPrompt, finishReasonFor, DEFAULT_PROVIDER, withRate, RATE_SEPARATOR, cleanForWire, isRefusal, MAX_PROMPT_CHARS } from '../lib/adapter.js'
 import { FALLBACK_RATES, rateFromTags, ratesFromBrief, fetchModelRates } from '../lib/rates.js'
 import { scanLocalStorage, toIdentity, findClientIdentity, credentialPath } from '../lib/identity.js'
@@ -458,8 +458,12 @@ test('a normal answer streams on the very first delta', async () => {
     for await (const chunk of adapter.stream({ model: 'doubao', messages: [{ role: 'user', content: [] }] })) {
       seen.push(chunk)
     }
-    assert.equal(seen[0].type, 'text-delta')
-    assert.equal(seen[0].text, '你', 'no perceptible buffering for a real answer')
+    // A block-start precedes the first delta (the harness needs it to open the
+    // block), but nothing else may be held back: the first text-delta is the
+    // very first character of the answer.
+    const firstText = seen.findIndex((c) => c.type !== 'block-start')
+    assert.equal(seen[firstText].type, 'text-delta')
+    assert.equal(seen[firstText].text, '你', 'no perceptible buffering for a real answer')
     assert.equal(seen.filter((c) => c.type === 'text-delta').map((c) => c.text).join(''), '你好！')
   } finally {
     globalThis.fetch = original
@@ -638,6 +642,13 @@ test('the pacer honours the minimum gap and the cooldown', async () => {
   assert.ok(waited[0] >= 30_000, 'the cooldown must be waited out first')
 })
 
+test('the default gap is short enough not to be felt as latency', () => {
+  // A turn already costs ~3.5s to first token upstream; a 6s floor made every
+  // follow-up wait for the previous turn to age out and was reported as "slower
+  // than WorkBuddy". The cooldown, not this number, is the risk-control guard.
+  assert.ok(new Pacer().minIntervalMs <= 2000, 'the default minimum gap must stay small')
+})
+
 // --------------------------------------------------------------------- framing
 
 test('parseFrames splits on blank lines and keeps multi-line data', () => {
@@ -655,6 +666,109 @@ test('textOf reads the stringified content FULL_MSG_NOTIFY carries', () => {
   assert.equal(textOf('CHUNK_DELTA', { text: 'part' }), 'part')
   assert.equal(textOf('SSE_HEARTBEAT', {}), '')
   assert.equal(textOf('CHUNK_DELTA', { text: 42 }), '')
+})
+
+// The reasoning stream is a text block whose parent is the 10040 header, and
+// CHUNK_DELTA frames carry no identity at all — they belong to whichever block
+// was declared last. Getting this wrong glued 259 characters of 思考 onto the
+// front of a real answer.
+const TEXT = (text, parent) => ({
+  block_type: 10000,
+  ...(parent === undefined ? {} : { parent_id: parent }),
+  content: { text_block: { text } },
+})
+const THINKING = (id) => ({
+  block_type: 10040,
+  block_id: id,
+  content: { thinking_block: { streaming_title: '正在思考', finish_title: '已完成思考' } },
+})
+
+test('the tracker attributes a thinking child block to reasoning, not to the answer', () => {
+  const tracker = createTextTracker()
+  assert.deepEqual(tracker.absorb('STREAM_MSG_NOTIFY', { message: { content: { content_block: [THINKING('h1')] } } }), [])
+  assert.equal(tracker.kind, 'reasoning')
+  assert.deepEqual(tracker.absorb('STREAM_CHUNK', { patch_op: [{ patch_object: 1, patch_value: { content_block: [TEXT('', 'h1')] } }] }), [])
+  assert.deepEqual(tracker.absorb('CHUNK_DELTA', { text: '先算甲' }), [{ kind: 'reasoning', text: '先算甲' }])
+  // The answer is a text block with no thinking parent; the kind flips with it.
+  tracker.absorb('STREAM_CHUNK', { patch_op: [{ patch_object: 1, patch_value: { content_block: [TEXT('3')] } }] })
+  assert.equal(tracker.kind, 'answer')
+  assert.deepEqual(tracker.absorb('CHUNK_DELTA', { text: '小时' }), [{ kind: 'answer', text: '小时' }])
+})
+
+test('textOf stays answer-only even when a thinking stream precedes it', () => {
+  const tracker = createTextTracker()
+  tracker.absorb('STREAM_MSG_NOTIFY', { message: { content: { content_block: [THINKING('h1')] } } })
+  tracker.absorb('CHUNK_DELTA', { text: '推理中的话' })
+  assert.equal(textOf('CHUNK_DELTA', { text: '推理中的话' }), '推理中的话', 'a fresh tracker has no history')
+  // With the history in place the answer text is what survives.
+  const payload = { patch_op: [{ patch_object: 1, patch_value: { content_block: [TEXT('答案')] } }] }
+  assert.deepEqual(tracker.absorb('STREAM_CHUNK', payload), [{ kind: 'answer', text: '答案' }])
+})
+
+test('thinking text reaches the UI as a reasoning block before the answer', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = fakeFetch([
+    'event: STREAM_MSG_NOTIFY\ndata: {"message":{"content":{"content_block":[{"block_type":10040,"block_id":"h1","content":{"thinking_block":{"streaming_title":"正在思考"}}}]}}}\n\n',
+    'event: CHUNK_DELTA\ndata: {"text":"先算效率"}\n\n',
+    'event: STREAM_CHUNK\ndata: {"patch_op":[{"patch_object":1,"patch_value":{"content_block":[{"block_type":10000,"content":{"text_block":{"text":"3"}}}]}}]}\n\n',
+    'event: SSE_REPLY_END\ndata: {"end_type":1}\n\n',
+  ])
+  try {
+    const adapter = createAdapter({
+      loadCredentials: async () => ({ cookies: 'a=b', identity: IDENTITY }),
+      logger: { warn() {} },
+      pacer: new Pacer({ minIntervalMs: 0 }),
+    })
+    const seen = []
+    for await (const chunk of adapter.stream({
+      model: 'doubao',
+      reasoningEffort: 'high',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'q' }] }],
+    })) {
+      seen.push(chunk)
+    }
+    const reasoning = seen.filter((c) => c.type === 'reasoning-delta')
+    const text = seen.filter((c) => c.type === 'text-delta')
+    assert.equal(reasoning.map((c) => c.text).join(''), '先算效率')
+    assert.equal(text.map((c) => c.text).join(''), '3', 'thinking text must not leak into the answer')
+    assert.notEqual(reasoning[0].index, text[0].index, 'the two blocks need separate indexes')
+    const starts = seen.filter((c) => c.type === 'block-start')
+    assert.deepEqual(
+      starts.map((c) => [c.index, c.blockType]),
+      [[reasoning[0].index, 'reasoning'], [text[0].index, 'text']],
+    )
+    assert.ok(
+      seen.indexOf(starts[0]) < seen.indexOf(reasoning[0]),
+      'a block must be opened before its first delta',
+    )
+    assert.equal(seen.filter((c) => c.type === 'finish').pop().reason.kind, 'stop')
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('a turn without thinking emits no reasoning block at all', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = fakeFetch([
+    'event: CHUNK_DELTA\ndata: {"text":"42"}\n\n',
+    'event: SSE_REPLY_END\ndata: {"end_type":1}\n\n',
+  ])
+  try {
+    const adapter = createAdapter({
+      loadCredentials: async () => ({ cookies: 'a=b', identity: IDENTITY }),
+      logger: { warn() {} },
+      pacer: new Pacer({ minIntervalMs: 0 }),
+    })
+    const seen = []
+    for await (const chunk of adapter.stream({ model: 'doubao', messages: [{ role: 'user', content: [] }] })) {
+      seen.push(chunk)
+    }
+    assert.equal(seen.filter((c) => c.type === 'reasoning-delta').length, 0)
+    assert.deepEqual(seen.filter((c) => c.type === 'block-start').map((c) => c.blockType), ['text'])
+    assert.equal(seen.filter((c) => c.type === 'text-delta').map((c) => c.text).join(''), '42')
+  } finally {
+    globalThis.fetch = original
+  }
 })
 
 // -------------------------------------------------------------------- wire shape
