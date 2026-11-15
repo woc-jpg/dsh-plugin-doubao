@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { Pacer, parseFrames, textOf, buildQuery, buildBody, resolveModel, findModel, MODELS } from '../lib/doubao.js'
-import { createAdapter, toPrompt, finishReasonFor, DEFAULT_PROVIDER, withRate, RATE_SEPARATOR, cleanForWire, isRefusal } from '../lib/adapter.js'
+import { createAdapter, toPrompt, finishReasonFor, DEFAULT_PROVIDER, withRate, RATE_SEPARATOR, cleanForWire, isRefusal, MAX_PROMPT_CHARS } from '../lib/adapter.js'
 import { FALLBACK_RATES, rateFromTags, ratesFromBrief, fetchModelRates } from '../lib/rates.js'
 import { scanLocalStorage, toIdentity, findClientIdentity, credentialPath } from '../lib/identity.js'
 import { readCredentials, writeCredentials, parseHint, credentialsPath } from '../lib/login.js'
@@ -71,6 +71,59 @@ test('toPrompt keeps a long user document and strips an attached reminder', () =
   const withReminder = doc + '\n<system-reminder>Instructions from: AGENTS.md</system-reminder>'
   const prompt = toPrompt([{ role: 'user', content: [{ type: 'text', text: withReminder }] }])
   assert.equal(prompt, doc, 'only the injected block is removed')
+})
+
+// A long-lived harness session reached 2,236,328 characters in `toPrompt`,
+// which the stateless Doubao endpoint rejects with `common invalid param`.
+// These cover the context budget added to fix that (mirrors workbuddy's
+// applyContextBudgets / keepPromptLast).
+
+test('toPrompt drops the runtime/tooling messages the harness injects', () => {
+  const injected = [
+    'Time sampled while preparing turn 18, step 44: 2026-11-15T12:53:18+08:00',
+    'Current runtime context. This snapshot supersedes earlier snapshots.',
+    '[Compressed conversation section] — folded history',
+    'This is an automatically generated checkpoint condensing an earlier span.',
+    'This is an efficiency nudge to keep working.',
+    '<system-reminder>Instructions from: AGENTS.md</system-reminder>',
+  ]
+  const prompt = toPrompt([
+    ...injected.map((text) => ({ role: 'user', content: [{ type: 'text', text }] })),
+    { role: 'user', content: [{ type: 'text', text: '只回答一个数字：8+9' }] },
+  ])
+  assert.equal(prompt, '只回答一个数字：8+9')
+})
+
+test('toPrompt budgets a long history: keeps head, marker and the last question', () => {
+  const head = '[System]\nbe brief'
+  const parts = [
+    { role: 'system', content: [{ type: 'text', text: 'be brief' }] },
+    { role: 'user', content: [{ type: 'text', text: 'OLD_ANCIENT_QUESTION' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'OLD_ANCIENT_ANSWER ' + '史'.repeat(500) }] },
+    { role: 'tool', content: [{ type: 'text', text: 'OLD_MIDDLE_TOOL_RESULT ' + '文'.repeat(500) }] },
+    { role: 'user', content: [{ type: 'text', text: '只回答一个数字：8+9' }] },
+  ]
+  const prompt = toPrompt(parts, { maxChars: 200 })
+  assert.ok(prompt.length <= 200, 'never exceeds the budget')
+  assert.ok(prompt.startsWith(head), 'the system head survives')
+  assert.match(prompt, /earlier turns omitted/, 'the truncation is visible')
+  assert.ok(prompt.includes('只回答一个数字：8+9'), 'the current question is never dropped')
+  assert.ok(!prompt.includes('OLD_ANCIENT_QUESTION'), 'the middle is what gets dropped')
+})
+
+test('toPrompt keeps the TAIL of a single oversized turn, where the instruction lives', () => {
+  const doc = 'A'.repeat(500) + 'QUESTION_AT_END'
+  const prompt = toPrompt([{ role: 'user', content: [{ type: 'text', text: doc }] }], { maxChars: 100 })
+  assert.ok(prompt.length <= 100)
+  assert.ok(prompt.includes('QUESTION_AT_END'), 'trim the head, not the tail')
+})
+
+test('a short history is passed through untouched (no marker)', () => {
+  const prompt = toPrompt([
+    { role: 'system', content: [{ type: 'text', text: 'be brief' }] },
+    { role: 'user', content: [{ type: 'text', text: '你好' }] },
+  ])
+  assert.equal(prompt, '[System]\nbe brief\n\n你好')
 })
 
 test('isRefusal recognizes only the canned moderation notice', () => {
@@ -437,6 +490,66 @@ test('a risk-control refusal is reported as an error finish, not thrown', async 
     assert.equal(seen[0].reason.kind, 'error')
     assert.equal(seen[0].reason.failure.code, 'RATE_LIMIT')
     assert.deepEqual(penalized, [60_000], 'a rate limit must extend the cooldown')
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('a gateway "invalid param" reply reports the wire prompt size for diagnosis', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = fakeFetch([
+    'event: STREAM_ERROR\ndata: {"error_msg":"common invalid param"}\n\n',
+  ])
+  try {
+    const adapter = createAdapter({
+      loadCredentials: async () => ({ cookies: 'a=b', identity: IDENTITY }),
+      logger: { warn() {} },
+      pacer: new Pacer({ minIntervalMs: 0 }),
+    })
+    const seen = []
+    for await (const chunk of adapter.stream({
+      model: 'doubao',
+      messages: [{ role: 'user', content: [{ type: 'text', text: '你好' }] }],
+    })) {
+      seen.push(chunk)
+    }
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].type, 'finish')
+    assert.match(seen[0].reason.failure.message, /common invalid param/)
+    assert.match(seen[0].reason.failure.message, /wire prompt was \d+ chars, budget 32000/)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('a long session is truncated to the wire budget before it reaches the endpoint', async () => {
+  let capturedText
+  const original = globalThis.fetch
+  globalThis.fetch = async (_url, init) => {
+    capturedText = JSON.parse(init.body).messages[0].content_block[0].content.text_block.text
+    return {
+      ok: true,
+      body: (async function* () {
+        yield Buffer.from('event: SSE_REPLY_END\ndata: {"end_type":1}\n\n', 'utf8')
+      })(),
+    }
+  }
+  try {
+    const adapter = createAdapter({
+      loadCredentials: async () => ({ cookies: 'a=b', identity: IDENTITY }),
+      logger: { warn() {} },
+      pacer: new Pacer({ minIntervalMs: 0 }),
+    })
+    const messages = []
+    for (let i = 0; i < 40; i++) {
+      messages.push({ role: 'user', content: [{ type: 'text', text: '旧轮次 ' + '历'.repeat(2000) }] })
+      messages.push({ role: 'assistant', content: [{ type: 'text', text: '旧回答 ' + '答'.repeat(2000) }] })
+    }
+    messages.push({ role: 'user', content: [{ type: 'text', text: '只回答一个数字：8+9' }] })
+    for await (const _ of adapter.stream({ model: 'doubao', messages })) { /* drain */ }
+    assert.ok(capturedText.length <= MAX_PROMPT_CHARS, 'wire body is within the budget')
+    assert.ok(capturedText.includes('只回答一个数字：8+9'), 'the current question survives truncation')
+    assert.match(capturedText, /earlier turns omitted/)
   } finally {
     globalThis.fetch = original
   }

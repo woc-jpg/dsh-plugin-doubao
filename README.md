@@ -169,6 +169,30 @@ Normal replies are unaffected: the refusal check only buffers deltas while they 
 of the notice's lead, which is shorter than one chunk, so a real answer starts streaming on its very
 first delta.
 
+## Context budget / long sessions
+
+The endpoint is stateless: DSH replays the whole visible conversation on every turn, and this adapter
+has to flatten it into one `text_block.text`. A long session therefore used to produce a request body
+of **2,253,285 characters** (1,497 blocks, including compressed summaries, tool results and injected
+runtime notes). Doubao's gateway answers an oversized single text block with a plain
+`common invalid param` SSE error — no error code, HTTP still 200 — so the UI just showed a failed
+turn with no explanation. A fresh session (≈900 characters) worked, an old one always failed.
+
+`toPrompt` now applies a `MAX_PROMPT_CHARS = 32_000` budget before the body is built, following the
+same idea as workbuddy's `applyContextBudgets` / `keepPromptLast`:
+
+- Runtime injections (`Time sampled while preparing turn …`, `Current runtime context`, ACP markers,
+  `[model changed: …]`, compressed-section headers) are not conversation and are dropped.
+- Host-marked assistant/tool meta-discussion (`AGENTS.md`, operating-mode phrases) is dropped too;
+  a short user question mentioning those words is kept, and so is a long document the user pasted.
+- If the remaining history still exceeds the budget, the adapter keeps the leading system hint, a
+  `[… earlier turns omitted …]` marker, and as many recent turns as fit. **The last user turn is
+  never dropped**; when a single turn is itself oversized, its tail is kept because that is where the
+  actual instruction lives.
+
+If the gateway ever returns `invalid param` again, the error finish now carries the wire prompt size
+and the budget, so a recurrence is self-diagnosing.
+
 ## Limitations
 
 - **Text only.** Doubao's web endpoint accepts no images here, so nothing advertises image input.
