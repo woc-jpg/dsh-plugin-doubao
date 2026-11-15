@@ -193,6 +193,29 @@ same idea as workbuddy's `applyContextBudgets` / `keepPromptLast`:
 If the gateway ever returns `invalid param` again, the error finish now carries the wire prompt size
 and the budget, so a recurrence is self-diagnosing.
 
+## Remaining credit
+
+Beside the composer, next to the model seat, the plugin shows `积分 9,793` while a Doubao model is
+selected — same place and same styling as the WorkBuddy plugin's credit readout. Hovering it breaks
+the total down per quota window; clicking re-reads it. It refreshes once a minute.
+
+The number comes from `POST /alice/commerce/sale/subscription/quota/summary/`, the endpoint the Doubao
+web client itself calls, authorised by the same cookies the chat requests already use. Two quota
+windows arrive (`活动赠送额度` and `月度额度`), each with a thousand-separated `total_amount` and
+`used_amount`; there is no ready-made `remaining` field, so it is `total - used`, clamped at zero.
+
+Three details are deliberate:
+
+- **A read failure shows `—`, never `0`.** Not signed in, offline, or an upstream shape change all
+  mean "could not read it", which is a different fact from "you have none left". `creditsFromSummary`
+  returns `undefined` for a payload it cannot parse, and the route answers `{"credits": null}`.
+- **The browser never talks to doubao.com.** The host reads the balance and serves it on
+  `GET /plugins/dsh-plugin-doubao/credits` (loopback-only, GET-only, `Cache-Control: no-store`); the
+  client bundle just fetches that same-origin path, so no cookie ever enters the page.
+- **It renders for the Doubao provider only.** The slot is drawn for every provider, so the component
+  runs its hooks unconditionally and returns `null` afterwards — switching to a WorkBuddy model must
+  not leave a stale Doubao number sitting in the composer.
+
 ## Limitations
 
 - **Text only.** Doubao's web endpoint accepts no images here, so nothing advertises image input.
@@ -213,6 +236,7 @@ and the budget, so a recurrence is self-diagnosing.
 ```bash
 node --test test/plugin.test.mjs    # protocol, framing, pacer, identity, credentials
 node --test test/apply.test.mjs     # wiring into a cordis context
+node --test test/credits.test.mjs   # quota parsing and the loopback credits route
 ```
 
 Pass the file, not the directory: `node --test test/` is treated as a module path and fails with
@@ -232,8 +256,10 @@ node -e "import('./lib/identity.js').then(m => console.log(m.toIdentity(m.findCl
 | `lib/identity.js` | Reads `device_id` and friends out of the installed client's `Local State`. |
 | `lib/adapter.js` | The LLM provider: model catalog, stream mapping, error mapping. |
 | `lib/rates.js` | Reads the credit multipliers from Doubao's model-list endpoint. |
+| `lib/credits.js` | Reads the remaining credit from Doubao's quota-summary endpoint. |
+| `lib/client.js` | The browser half: the credit readout in `conversation.input.right`. |
 | `lib/login.js` | QR sign-in page, cookie harvest, credential storage. |
-| `lib/index.js` | `apply()`: registers the provider and the `doubao` service. |
+| `lib/index.js` | `apply()`: registers the provider, the `doubao` service and the credits route. |
 | `bin/login.js` | The `dsh-plugin-doubao` command. |
 
 ## Legal
