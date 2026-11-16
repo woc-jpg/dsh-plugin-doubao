@@ -58,8 +58,10 @@ dsh plugin --profile web add github:<owner>/dsh-plugin-doubao
 node bin/login.js
 ```
 
-Replace `<owner>` with the account that hosts this repo. Restart DSH, then choose a Doubao model.
-The login step is only needed once; the session is cached in `~/.dsh/doubao-local/credentials.json`.
+Replace `<owner>` with the account that hosts this repo. `dsh plugin add` installs the package and
+activates it as a profile bundle automatically (the package declares `dsh.bundle.patch`). Restart
+DSH, then choose a Doubao model. The login step is only needed once; the session is cached in
+`~/.dsh/doubao-local/credentials.json`.
 
 If your DSH profile is the desktop app's, `dsh plugin` refuses to touch it (the Electron app owns
 that profile). Add the dependency to the profile's `package.json` by hand and run `pnpm install`
