@@ -46,11 +46,16 @@ the client's own list and are shown without a suffix.
 
 ## Install
 
-Straight from this repository — no npm release needed, since `pnpm` resolves a git URL directly:
+Install from this repository. There is deliberately **no npm release** — do not use
+`npx dsh-plugin-doubao`, because that asks the npm registry for a package that is not
+there. `pnpm` resolves a git URL directly, and the login helper is run from the checked-out
+repository:
 
 ```bash
+git clone https://github.com/<owner>/dsh-plugin-doubao.git
+cd dsh-plugin-doubao
 dsh plugin --profile web add github:<owner>/dsh-plugin-doubao
-npx dsh-plugin-doubao login
+node bin/login.js
 ```
 
 Replace `<owner>` with the account that hosts this repo. Restart DSH, then choose a Doubao model.
@@ -68,7 +73,7 @@ and add `"dsh-plugin-doubao"` to `dsh.profile.bundles` in the same file.
 
 ## Sign in
 
-`npx dsh-plugin-doubao login` prints a URL, serves a QR code there, and exits once you have scanned it.
+`node bin/login.js` (from the checked-out repository) prints a URL, serves a QR code there, and exits once you have scanned it.
 
 **Scan with the Douyin app (抖音), not the Doubao app.** Doubao's own sign-in page says this, and
 scanning with Doubao simply fails with no useful error.

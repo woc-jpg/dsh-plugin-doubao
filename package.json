@@ -29,14 +29,6 @@
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": "~4.0.5"
-  },
-  "peerDependenciesMeta": {
-    "@deepseek-ai/cordis": {
-      "optional": true
-    }
-  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

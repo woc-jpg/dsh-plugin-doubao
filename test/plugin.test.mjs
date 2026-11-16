@@ -8,7 +8,7 @@ import { Pacer, parseFrames, textOf, createTextTracker, buildQuery, buildBody, r
 import { ensureBridge, forgetLaunchAttempts, launchClient, pickTarget, discoverClientExe, stopExistingClient } from '../lib/bridge.js'
 import { createAdapter, toPrompt, finishReasonFor, DEFAULT_PROVIDER, withRate, RATE_SEPARATOR, cleanForWire, isRefusal, MAX_PROMPT_CHARS } from '../lib/adapter.js'
 import { FALLBACK_RATES, rateFromTags, ratesFromBrief, fetchModelRates } from '../lib/rates.js'
-import { scanLocalStorage, toIdentity, findClientIdentity, credentialPath } from '../lib/identity.js'
+import { scanLocalStorage, toIdentity, findClientIdentity, credentialPath, candidateUserDataDirs } from '../lib/identity.js'
 import { readCredentials, writeCredentials, parseHint, credentialsPath } from '../lib/login.js'
 
 const IDENTITY = {
@@ -963,6 +963,18 @@ test('findClientIdentity reports every place it looked when nothing is found', (
   assert.ok(result.tried.length > 0, 'the failure must say where it looked')
 })
 
+test('identity probes platform-specific install locations', () => {
+  const env = { LOCALAPPDATA: 'C:/Users/me/AppData/Local', APPDATA: 'C:/Users/me/AppData/Roaming' }
+  const win = candidateUserDataDirs(env, 'win32')
+  assert.ok(win.some((p) => p.includes('Doubao') && p.includes('User Data')), 'Windows probes the client profile')
+  const mac = candidateUserDataDirs({}, 'darwin')
+  assert.ok(mac.some((p) => p.includes('Library/Application Support/Doubao')), 'macOS probes Application Support')
+  const lin = candidateUserDataDirs({}, 'linux')
+  assert.ok(lin.some((p) => p.includes('.config/doubao')), 'Linux probes XDG config')
+  const linEnv = candidateUserDataDirs({ XDG_CONFIG_HOME: '/tmp/xdg' }, 'linux')
+  assert.ok(linEnv.some((p) => p.startsWith('/tmp/xdg/')), 'XDG_CONFIG_HOME is honoured')
+})
+
 // ------------------------------------------------------------------ credentials
 
 test('credentials round-trip through the store, BOM and all', () => {
@@ -1204,6 +1216,26 @@ test('ensureBridge remembers a failed launch so it is not retried every turn', a
   forgetLaunchAttempts()
 })
 
+test('ensureBridge retries a failed launch after the retry window', async () => {
+  forgetLaunchAttempts()
+  let launched = 0
+  let installed = false
+  const opts = {
+    retryMs: 0, // no TTL in the test; drive the cache expiry deterministically
+    available: async () => installed,
+    launch: async () => {
+      launched += 1
+      if (launched === 1) return false // first turn: client not installed yet
+      installed = true // the client got installed between two turns
+      return true
+    },
+  }
+  assert.equal(await ensureBridge(9222, opts), false) // first attempt: not installed
+  assert.equal(await ensureBridge(9222, opts), true) // after TTL: retried, now works
+  assert.equal(launched, 2, 'a stale failure must not strand later turns')
+  forgetLaunchAttempts()
+})
+
 test('ensureBridge swallows a throwing launcher', async () => {
   forgetLaunchAttempts()
   const ok = await ensureBridge(9222, {
@@ -1222,6 +1254,7 @@ test('launchClient starts a fresh client when nothing is in the way', async () =
   let up = false
   const ok = await launchClient(9222, {
     discover: async () => 'D:\\Doubao\\app\\Doubao.exe',
+    pollMs: 1,
     spawn: async () => {
       spawns += 1
       up = true
@@ -1243,6 +1276,7 @@ test('launchClient restarts a stale client that ate the debugger flag', async ()
   let up = false
   const ok = await launchClient(9222, {
     discover: async () => 'D:\\Doubao\\app\\Doubao.exe',
+    pollMs: 1,
     spawn: async () => {
       spawns += 1
       // The first launch joins an existing instance, so no bridge appears;
