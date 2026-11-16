@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { Pacer, parseFrames, textOf, createTextTracker, buildQuery, buildBody, resolveModel, findModel, MODELS, createStreamChat } from '../lib/doubao.js'
-import { pickTarget } from '../lib/bridge.js'
+import { ensureBridge, forgetLaunchAttempts, pickTarget } from '../lib/bridge.js'
 import { createAdapter, toPrompt, finishReasonFor, DEFAULT_PROVIDER, withRate, RATE_SEPARATOR, cleanForWire, isRefusal, MAX_PROMPT_CHARS } from '../lib/adapter.js'
 import { FALLBACK_RATES, rateFromTags, ratesFromBrief, fetchModelRates } from '../lib/rates.js'
 import { scanLocalStorage, toIdentity, findClientIdentity, credentialPath } from '../lib/identity.js'
@@ -1130,4 +1130,70 @@ test('the target picker only accepts the client chat surface', () => {
   assert.equal(pickTarget([{ type: 'page', url: 'doubao://doubao-background/' }]), undefined)
   assert.equal(pickTarget([]), undefined)
   assert.equal(pickTarget(undefined), undefined)
+})
+
+test('ensureBridge does nothing when a client is already reachable', async () => {
+  forgetLaunchAttempts()
+  let launched = 0
+  const ok = await ensureBridge(9222, {
+    available: async () => true,
+    launch: async () => {
+      launched += 1
+      return true
+    },
+  })
+  assert.equal(ok, true)
+  assert.equal(launched, 0, 'an existing client is left alone')
+})
+
+test('ensureBridge starts the client once and shares the attempt across callers', async () => {
+  forgetLaunchAttempts()
+  let launched = 0
+  let up = false
+  const opts = {
+    available: async () => up,
+    launch: async () => {
+      launched += 1
+      await new Promise((r) => setTimeout(r, 20))
+      up = true
+      return true
+    },
+  }
+  const [a, b] = await Promise.all([ensureBridge(9222, opts), ensureBridge(9222, opts)])
+  assert.equal(a, true)
+  assert.equal(b, true)
+  assert.equal(launched, 1, 'concurrent callers must not spawn two clients')
+  // The cached result still returns true afterwards without relaunching.
+  const c = await ensureBridge(9222, opts)
+  assert.equal(c, true)
+  assert.equal(launched, 1, 'a successful launch is remembered')
+  forgetLaunchAttempts()
+})
+
+test('ensureBridge remembers a failed launch so it is not retried every turn', async () => {
+  forgetLaunchAttempts()
+  let launched = 0
+  const opts = {
+    available: async () => false,
+    launch: async () => {
+      launched += 1
+      return false
+    },
+  }
+  assert.equal(await ensureBridge(9222, opts), false)
+  assert.equal(await ensureBridge(9222, opts), false)
+  assert.equal(launched, 1, 'one failure is enough; no machine appears between two questions')
+  forgetLaunchAttempts()
+})
+
+test('ensureBridge swallows a throwing launcher', async () => {
+  forgetLaunchAttempts()
+  const ok = await ensureBridge(9222, {
+    available: async () => false,
+    launch: async () => {
+      throw new Error('spawn failed')
+    },
+  })
+  assert.equal(ok, false)
+  forgetLaunchAttempts()
 })
