@@ -628,6 +628,54 @@ test('an abandoned stream still releases the lock', async () => {
   await pacer.run(async () => {})
 })
 
+test('a stream dropped without return() stops blocking the next turn', async () => {
+  // The harness abandons a turn by walking away from the iterator, not by
+  // breaking out of a `for await`. Nothing runs then — not the generator's
+  // `finally`, not the caller's — so the lock has to expire on its own, or every
+  // later turn (including one on another model) waits forever.
+  const pacer = new Pacer({ minIntervalMs: 0, leaseMs: 30 })
+  async function* endless() {
+    for (;;) yield 'x'
+  }
+  const iterator = pacer.runIterable(endless)[Symbol.asyncIterator]()
+  assert.equal((await iterator.next()).value, 'x')
+  // Deliberately no iterator.return(): this is what an aborted turn looks like.
+  await pacer.run(async () => {})
+})
+
+test('aborting a turn lets the next one start immediately', async () => {
+  const pacer = new Pacer({ minIntervalMs: 0, leaseMs: 600_000 })
+  const controller = new AbortController()
+  async function* endless() {
+    for (;;) yield 'x'
+  }
+  const iterator = pacer.runIterable(endless, { signal: controller.signal })[Symbol.asyncIterator]()
+  assert.equal((await iterator.next()).value, 'x')
+  controller.abort()
+  const started = Date.now()
+  await pacer.run(async () => {})
+  assert.ok(Date.now() - started < 100, 'the abort must release the lock without waiting for the lease')
+})
+
+test('a cooldown belongs to the model that earned it', async () => {
+  const pacer = new Pacer({ minIntervalMs: 0 })
+  pacer.penalize(60_000, 'deepseek-v4.1-flash')
+  assert.ok(pacer.cooldownFor('deepseek-v4.1-flash') > 0)
+  assert.equal(pacer.cooldownFor('doubao-expert'), 0, 'another model must not inherit the penalty')
+  const started = Date.now()
+  await pacer.run(async () => {}, { key: 'doubao-expert' })
+  assert.ok(Date.now() - started < 100, 'switching models must not wait out the previous model')
+})
+
+test('a penalty without a model key still cools every caller down', async () => {
+  let clock = 0
+  const waited = []
+  const pacer = new Pacer({ minIntervalMs: 0, now: () => clock, sleep: async (ms) => { waited.push(ms); clock += ms } })
+  pacer.penalize(30_000)
+  await pacer.run(async () => {}, { key: 'doubao' })
+  assert.ok(waited[0] >= 30_000, 'an unscoped penalty is account-wide')
+})
+
 test('the pacer honours the minimum gap and the cooldown', async () => {
   let clock = 0
   const waited = []
