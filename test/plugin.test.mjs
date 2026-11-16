@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { Pacer, parseFrames, textOf, createTextTracker, buildQuery, buildBody, resolveModel, findModel, MODELS, createStreamChat } from '../lib/doubao.js'
-import { ensureBridge, forgetLaunchAttempts, pickTarget } from '../lib/bridge.js'
+import { ensureBridge, forgetLaunchAttempts, launchClient, pickTarget } from '../lib/bridge.js'
 import { createAdapter, toPrompt, finishReasonFor, DEFAULT_PROVIDER, withRate, RATE_SEPARATOR, cleanForWire, isRefusal, MAX_PROMPT_CHARS } from '../lib/adapter.js'
 import { FALLBACK_RATES, rateFromTags, ratesFromBrief, fetchModelRates } from '../lib/rates.js'
 import { scanLocalStorage, toIdentity, findClientIdentity, credentialPath } from '../lib/identity.js'
@@ -1196,4 +1196,59 @@ test('ensureBridge swallows a throwing launcher', async () => {
   })
   assert.equal(ok, false)
   forgetLaunchAttempts()
+})
+
+test('launchClient starts a fresh client when nothing is in the way', async () => {
+  let spawns = 0
+  let stops = 0
+  let up = false
+  const ok = await launchClient(9222, {
+    existsSync: async () => true,
+    spawn: async () => {
+      spawns += 1
+      up = true
+      return {}
+    },
+    available: async () => up,
+    stop: async () => {
+      stops += 1
+    },
+  })
+  assert.equal(ok, true)
+  assert.equal(spawns, 1)
+  assert.equal(stops, 0, 'a clean start never kills anything')
+})
+
+test('launchClient restarts a stale client that ate the debugger flag', async () => {
+  let spawns = 0
+  let stops = 0
+  let up = false
+  const ok = await launchClient(9222, {
+    existsSync: async () => true,
+    spawn: async () => {
+      spawns += 1
+      // The first launch joins an existing instance, so no bridge appears;
+      // only after it has been stopped does the second launch succeed.
+      if (spawns >= 2) up = true
+      return {}
+    },
+    available: async () => up,
+    stop: async () => {
+      stops += 1
+      up = false
+    },
+  })
+  assert.equal(ok, true)
+  assert.equal(spawns, 2, 'the client is launched once more after stopping the stale one')
+  assert.equal(stops, 1, 'exactly one stale instance is stopped')
+})
+
+test('launchClient gives up quietly when the client is not installed', async () => {
+  const ok = await launchClient(9222, {
+    existsSync: async () => false,
+    spawn: async () => {
+      throw new Error('should not spawn')
+    },
+  })
+  assert.equal(ok, false)
 })

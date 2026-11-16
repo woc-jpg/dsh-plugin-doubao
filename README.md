@@ -96,11 +96,10 @@ session from your scan. That means:
   runs.
 
 What the plugin does with the client has one exception, described under [When the risk engine takes
-an interest](#when-the-risk-engine-takes-an-interest): if the client is *already* running with a
-debugger port open, chat requests are routed through its page so its own hook can sign them. It is
-still never launched by the plugin, and an idle client is never touched — reading `Local State` and
-driving a live page are both passive from your point of view, but only the second one needs the
-client to be up.
+an interest](#when-the-risk-engine-takes-an-interest): chat requests are routed through the client's
+page so its own hook can sign them. If the client is not running with a debugger port, the plugin
+starts (or restarts) it with one — that is the only time it launches an app on your behalf. Reading
+`Local State` is passive; the restart only happens when a request actually needs a signature.
 
 `login` tells you straight away if no client identity is found, and lists the directories it looked in.
 
@@ -125,7 +124,7 @@ All optional. Set them in the profile's `cordis.patch.yml` entry for `dsh-plugin
 | `minIntervalMs` | `1500` | Minimum gap between turns. Turns are serialized and spaced; see below. |
 | `credentialsPath` | `~/.dsh/doubao-local/credentials.json` | Where the session is cached. |
 | `loginPort` | `8899` | Port for the QR page served inside a session. |
-| `bridgePort` | `9222` | DevTools port of the desktop client, used when it is running. |
+| `bridgePort` | `9222` | DevTools port used for the client bridge, including when starting the client. |
 
 Environment: `DOUBAO_CREDENTIALS` overrides the credential path, `DOUBAO_LOGIN_PORT` the login port,
 `DSH_HOME` the base directory.
@@ -201,27 +200,34 @@ is not reachable either, since `a_bogus` appears in none of the client's 26 load
 `window.byted_acrawler` does not exist. The signing lives in the client's preload, wrapped around
 `fetch` itself.
 
-So the plugin borrows the signer instead of imitating it. When the desktop client is running with a
-debugger port open (`9222` by default), `lib/bridge.js` connects to its chat page over the DevTools
-protocol and lets *the page* perform the request: its own preload hook adds the signature, and each
-response chunk is pushed back through a runtime binding as it arrives, so the plugin still streams
-rather than buffering. Measured that way the first token lands in 160–290ms of transport time, which
-is faster than the unsigned path ever was.
+So the plugin borrows the signer instead of imitating it. `lib/bridge.js` connects to the client's
+chat page over the DevTools protocol and lets *the page* perform the request: its own preload hook
+adds the signature, and each response chunk is pushed back through a runtime binding as it arrives,
+so the plugin still streams rather than buffering. Measured that way the first token lands in
+160–290ms of transport time, which is faster than the unsigned path ever was. The bridge uses port
+`9222` by default.
 
-The bridge is opportunistic, not required:
+Getting there is automatic. The debugger port only exists when the client was started with
+`--remote-debugging-port`, which an ordinary launch does not pass — and a second launch against a
+running client just joins it and drops the flag. So on the first request that needs a signature, the
+plugin checks for a bridge, and if none is there it starts the client with the flag, stopping and
+restarting an existing instance if one is in the way. The attempt is made once per port per process
+and its result cached (success or failure), so a flagged-less machine is not spawned on every turn
+and a missing install is not retried on every message. In practice a plain client is brought up to a
+working bridge in about five seconds, once.
 
-- No client reachable → a plain request is sent, exactly as before. Nothing could sign it anyway, so
-  this is the correct fallback rather than a degraded one.
+The bridge is a transport, with a clear failure model:
+
+- No client and no way to start one (the executable is not installed) → a plain unsigned request is
+  sent. Nothing could sign it anyway, so this is the honest fallback, not a degraded one.
 - A client reachable but the page dies mid-flight → the turn fails with code `BRIDGE`, mapped to
   `TRANSPORT` so the harness may retry it. That is deliberately *not* reported as `RATE_LIMIT`:
   retrying a rate limit deepens it, while retrying a dropped local connection is harmless.
 - `bridge: false` on a call forces the direct path, and `bridgePort` overrides the port.
 
-Two things this does not do. It does not launch the client — if no client is running the plugin says
-so through the direct path's error rather than starting one behind your back. And it does not make a
-flagged account work: the bridge satisfies the *signature* check, so an account held only by that
-check recovers immediately, but an account under an active semantic flag can still be refused, and
-only the captcha in the client clears that.
+What this does not do is make a flagged account work in general: the bridge satisfies the
+*signature* check, so an account held only by that check recovers immediately, but an account under
+an active semantic flag can still be refused, and only the captcha in the client clears that.
 
 ## Content moderation
 
