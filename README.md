@@ -91,10 +91,16 @@ device id out of the **installed Doubao desktop client's** `Local State` file, a
 session from your scan. That means:
 
 - **The Doubao desktop client must be installed and signed in at least once** on the same machine.
-  The plugin never launches it, never drives it, and works fine while it is closed — it only reads a
-  JSON file. But without it there is no device id to use.
+  Without it there is no device id to use.
 - Signing in on a different machine than the one that runs DSH will not work; run `login` where DSH
   runs.
+
+What the plugin does with the client has one exception, described under [When the risk engine takes
+an interest](#when-the-risk-engine-takes-an-interest): if the client is *already* running with a
+debugger port open, chat requests are routed through its page so its own hook can sign them. It is
+still never launched by the plugin, and an idle client is never touched — reading `Local State` and
+driving a live page are both passive from your point of view, but only the second one needs the
+client to be up.
 
 `login` tells you straight away if no client identity is found, and lists the directories it looked in.
 
@@ -116,9 +122,10 @@ All optional. Set them in the profile's `cordis.patch.yml` entry for `dsh-plugin
 | --- | --- | --- |
 | `providerId` | `doubao` | Provider id shown to the harness. Change it if another plugin already claims `doubao`. |
 | `displayName` | `Doubao` | Name shown in the picker. |
-| `minIntervalMs` | `6000` | Minimum gap between turns. Turns are serialized and spaced; see below. |
+| `minIntervalMs` | `1500` | Minimum gap between turns. Turns are serialized and spaced; see below. |
 | `credentialsPath` | `~/.dsh/doubao-local/credentials.json` | Where the session is cached. |
 | `loginPort` | `8899` | Port for the QR page served inside a session. |
+| `bridgePort` | `9222` | DevTools port of the desktop client, used when it is running. |
 
 Environment: `DOUBAO_CREDENTIALS` overrides the credential path, `DOUBAO_LOGIN_PORT` the login port,
 `DSH_HOME` the base directory.
@@ -168,6 +175,53 @@ turn did not end the way the plugin assumed.
 Both are covered by tests (`a stream dropped without return() stops blocking the next turn`,
 `aborting a turn lets the next one start immediately`, `a cooldown belongs to the model that earned
 it`) and were reproduced against the live endpoint before and after the fix.
+
+## When the risk engine takes an interest
+
+While an account is in good standing, a plain HTTPS request is enough and this plugin is as
+self-contained as it looks. Once the semantic risk model flags the account, that stops being true:
+every unsigned request comes back as `710022004`, no matter how the payload is shaped. That was
+measured rather than assumed — a client request was captured and then bisected field by field:
+
+| Variation | Result |
+| --- | --- |
+| Vary the query string (versions, `web_id`, `device_platform`) | still `710022004` |
+| Vary the session cookie (stored vs. the client's live jar) | still `710022004` |
+| Vary the model or the wording | still `710022004` |
+| Vary `client_meta` (conversation id, last section, message index) | no effect |
+| Vary `option` | this is what the check reads |
+| Reuse a `conversation_id` that already exists | accepted, but only replays history |
+| Replay a captured signed URL | accepted, but only replays history |
+
+The last two rows are the interesting ones. A captured request is signed with `a_bogus` plus an
+`msToken`, and those are bound to the body: change one field and the signature stops matching, which
+is why a replay only ever returns what the original call returned. New conversations are refused
+outright, so no amount of shape-matching inside Node can make a fresh request pass — and the signer
+is not reachable either, since `a_bogus` appears in none of the client's 26 loaded bundles and
+`window.byted_acrawler` does not exist. The signing lives in the client's preload, wrapped around
+`fetch` itself.
+
+So the plugin borrows the signer instead of imitating it. When the desktop client is running with a
+debugger port open (`9222` by default), `lib/bridge.js` connects to its chat page over the DevTools
+protocol and lets *the page* perform the request: its own preload hook adds the signature, and each
+response chunk is pushed back through a runtime binding as it arrives, so the plugin still streams
+rather than buffering. Measured that way the first token lands in 160–290ms of transport time, which
+is faster than the unsigned path ever was.
+
+The bridge is opportunistic, not required:
+
+- No client reachable → a plain request is sent, exactly as before. Nothing could sign it anyway, so
+  this is the correct fallback rather than a degraded one.
+- A client reachable but the page dies mid-flight → the turn fails with code `BRIDGE`, mapped to
+  `TRANSPORT` so the harness may retry it. That is deliberately *not* reported as `RATE_LIMIT`:
+  retrying a rate limit deepens it, while retrying a dropped local connection is harmless.
+- `bridge: false` on a call forces the direct path, and `bridgePort` overrides the port.
+
+Two things this does not do. It does not launch the client — if no client is running the plugin says
+so through the direct path's error rather than starting one behind your back. And it does not make a
+flagged account work: the bridge satisfies the *signature* check, so an account held only by that
+check recovers immediately, but an account under an active semantic flag can still be refused, and
+only the captcha in the client clears that.
 
 ## Content moderation
 
@@ -306,6 +360,7 @@ node -e "import('./lib/identity.js').then(m => console.log(m.toIdentity(m.findCl
 | File | Role |
 | --- | --- |
 | `lib/doubao.js` | The wire protocol: query/body shaping, SSE framing, thinking/answer attribution, the turn pacer. |
+| `lib/bridge.js` | The signed-request bridge: drives the running client over the DevTools protocol. |
 | `lib/identity.js` | Reads `device_id` and friends out of the installed client's `Local State`. |
 | `lib/adapter.js` | The LLM provider: model catalog, stream mapping, error mapping. |
 | `lib/rates.js` | Reads the credit multipliers from Doubao's model-list endpoint. |

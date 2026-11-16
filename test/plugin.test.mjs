@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'nod
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-import { Pacer, parseFrames, textOf, createTextTracker, buildQuery, buildBody, resolveModel, findModel, MODELS } from '../lib/doubao.js'
+import { Pacer, parseFrames, textOf, createTextTracker, buildQuery, buildBody, resolveModel, findModel, MODELS, createStreamChat } from '../lib/doubao.js'
+import { pickTarget } from '../lib/bridge.js'
 import { createAdapter, toPrompt, finishReasonFor, DEFAULT_PROVIDER, withRate, RATE_SEPARATOR, cleanForWire, isRefusal, MAX_PROMPT_CHARS } from '../lib/adapter.js'
 import { FALLBACK_RATES, rateFromTags, ratesFromBrief, fetchModelRates } from '../lib/rates.js'
 import { scanLocalStorage, toIdentity, findClientIdentity, credentialPath } from '../lib/identity.js'
@@ -143,6 +144,9 @@ test('finishReasonFor maps the codes the service actually returns', () => {
   assert.equal(finishReasonFor(Object.assign(new Error('rate'), { code: 710022004 })).failure.code, 'RATE_LIMIT')
   assert.equal(finishReasonFor(Object.assign(new Error('auth'), { code: 710012001 })).failure.code, 'AUTH')
   assert.equal(finishReasonFor(new Error('boom')).failure.code, 'DOUBAO_ERROR')
+  // A bridge fault is purely local — the client page went away — so it must be
+  // retryable, unlike RATE_LIMIT which retrying only deepens.
+  assert.equal(finishReasonFor(Object.assign(new Error('bridge'), { code: 'BRIDGE' })).failure.code, 'TRANSPORT')
 })
 
 // ------------------------------------------------------------------- model catalog
@@ -978,4 +982,152 @@ test('parseHint cleans the emphasis markup out of the server copy', () => {
   const hint = parseHint('{"desc":"请使用[color=red]「抖音 APP」[/]扫码验证"}')
   assert.equal(hint, '请使用「抖音 APP」扫码验证')
   assert.equal(parseHint('not json'), undefined)
+})
+
+// ------------------------------------------------------------- the client bridge
+
+test('a reachable client signs the request, so the plain fetch is skipped', async () => {
+  const original = globalThis.fetch
+  let fetched = 0
+  globalThis.fetch = async () => {
+    fetched += 1
+    throw new Error('the unsigned path must not be used while a client is reachable')
+  }
+  const calls = []
+  try {
+    const streamChat = createStreamChat({
+      available: async () => true,
+      stream: async function* ({ url, body, port }) {
+        calls.push({ url, body, port })
+        yield 'event: SSE_ACK\ndata: {"ack_client_meta":{"conversation_id":"c9"}}\n\n'
+        yield 'event: CHUNK_DELTA\ndata: {"text":"7"}\n\n'
+        yield 'event: SSE_REPLY_END\ndata: {"end_type":1}\n\n'
+      },
+    })
+    const seen = []
+    for await (const ev of streamChat({
+      identity: IDENTITY,
+      cookies: 'a=b',
+      text: 'q',
+      model: 'doubao',
+    })) {
+      seen.push(ev)
+    }
+    assert.equal(fetched, 0, 'the bridge must carry the request on its own')
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].port, 9222, 'the default debugger port is used when none is configured')
+    assert.ok(calls[0].body.includes('"q"'))
+    assert.equal(seen.find((e) => e.type === 'meta')?.conversationId, 'c9')
+    assert.equal(seen.filter((e) => e.type === 'delta').map((e) => e.text).join(''), '7')
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('without a client the request falls back to the plain endpoint', async () => {
+  const original = globalThis.fetch
+  const urls = []
+  globalThis.fetch = async (url) => {
+    urls.push(String(url))
+    return {
+      ok: true,
+      body: (async function* () {
+        yield Buffer.from('event: CHUNK_DELTA\ndata: {"text":"uns"}\n\n', 'utf8')
+        yield Buffer.from('event: SSE_REPLY_END\ndata: {"end_type":1}\n\n', 'utf8')
+      })(),
+    }
+  }
+  try {
+    const streamChat = createStreamChat({
+      available: async () => false,
+      stream: async function* () {
+        throw new Error('the bridge must not be opened when no client is reachable')
+      },
+    })
+    let text = ''
+    for await (const ev of streamChat({
+      identity: IDENTITY,
+      cookies: 'a=b',
+      text: 'q',
+      model: 'doubao',
+    })) {
+      if (ev.type === 'delta') text += ev.text
+    }
+    assert.equal(text, 'uns')
+    assert.equal(urls.length, 1)
+    assert.ok(urls[0].startsWith('https://www.doubao.com/chat/completion?'))
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('a bridge that dies mid-flight is reported as a bridge fault, not a rate limit', async () => {
+  const streamChat = createStreamChat({
+    available: async () => true,
+    stream: async function* () {
+      yield 'event: CHUNK_DELTA\ndata: {"text":"par"}\n\n'
+      throw new Error('cdp socket closed')
+    },
+  })
+  const seen = []
+  for await (const ev of streamChat({
+    identity: IDENTITY,
+    cookies: 'a=b',
+    text: 'q',
+    model: 'doubao',
+  })) {
+    seen.push(ev)
+  }
+  const error = seen.find((e) => e.type === 'error')
+  // Calling this a rate limit would send the host down a retry path that can
+  // only make the real problem worse, and would mislabel a local fault.
+  assert.equal(error?.code, 'BRIDGE')
+  assert.match(error.message, /cdp socket closed/)
+})
+
+test('the bridge can be switched off for a call that must go direct', async () => {
+  const original = globalThis.fetch
+  let bridgeOpened = false
+  globalThis.fetch = async () => ({
+    ok: true,
+    body: (async function* () {
+      yield Buffer.from('event: SSE_REPLY_END\ndata: {"end_type":1}\n\n', 'utf8')
+    })(),
+  })
+  try {
+    const streamChat = createStreamChat({
+      available: async () => true,
+      stream: async function* () {
+        bridgeOpened = true
+      },
+    })
+    for await (const _ of streamChat({
+      identity: IDENTITY,
+      cookies: 'a=b',
+      text: 'q',
+      model: 'doubao',
+      bridge: false,
+    })) {
+      /* drain */
+    }
+    assert.equal(bridgeOpened, false)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('the target picker only accepts the client chat surface', () => {
+  // The client keeps a background target on the same origin with a zero
+  // viewport; it loads but answers nothing, so matching on type alone would
+  // silently pick a dud.
+  const list = [
+    { type: 'page', url: 'https://www.doubao.com/chat/' },
+    { type: 'other', url: 'doubao://doubao-chat/chat' },
+    { type: 'page', url: 'doubao://doubao-background/' },
+    { type: 'page', url: 'doubao://doubao-chat/chat' },
+  ]
+  assert.equal(pickTarget(list)?.url, 'https://www.doubao.com/chat/', 'a chat page wins')
+  assert.equal(pickTarget([{ type: 'page', url: 'doubao://doubao-background/' }]), undefined)
+  assert.equal(pickTarget([]), undefined)
+  assert.equal(pickTarget(undefined), undefined)
 })

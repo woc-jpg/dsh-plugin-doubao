@@ -108,16 +108,18 @@ test('resolveConfig falls through to defaults and honours overrides', () => {
   // Small on purpose: the pacer holds its lock for the whole turn, so this is
   // also the floor between two questions, and 6000 was felt as lag.
   assert.equal(defaults.minIntervalMs, 1500)
+  assert.equal(defaults.bridgePort, 9222, 'the client debugger port has a usable default')
   assert.ok(defaults.credentialsPath.endsWith('credentials.json'))
-  const custom = resolveConfig({ providerId: 'x', minIntervalMs: 1, credentialsPath: 'C:/c.json', loginPort: 1234 })
+  const custom = resolveConfig({ providerId: 'x', minIntervalMs: 1, credentialsPath: 'C:/c.json', loginPort: 1234, bridgePort: 9999 })
   assert.deepEqual(
     {
       providerId: custom.providerId,
       minIntervalMs: custom.minIntervalMs,
       credentialsPath: custom.credentialsPath,
       loginPort: custom.loginPort,
+      bridgePort: custom.bridgePort,
     },
-    { providerId: 'x', minIntervalMs: 1, credentialsPath: 'C:/c.json', loginPort: 1234 },
+    { providerId: 'x', minIntervalMs: 1, credentialsPath: 'C:/c.json', loginPort: 1234, bridgePort: 9999 },
   )
 })
 
