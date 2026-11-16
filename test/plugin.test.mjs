@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { Pacer, parseFrames, textOf, createTextTracker, buildQuery, buildBody, resolveModel, findModel, MODELS, createStreamChat } from '../lib/doubao.js'
-import { ensureBridge, forgetLaunchAttempts, launchClient, pickTarget } from '../lib/bridge.js'
+import { ensureBridge, forgetLaunchAttempts, launchClient, pickTarget, discoverClientExe } from '../lib/bridge.js'
 import { createAdapter, toPrompt, finishReasonFor, DEFAULT_PROVIDER, withRate, RATE_SEPARATOR, cleanForWire, isRefusal, MAX_PROMPT_CHARS } from '../lib/adapter.js'
 import { FALLBACK_RATES, rateFromTags, ratesFromBrief, fetchModelRates } from '../lib/rates.js'
 import { scanLocalStorage, toIdentity, findClientIdentity, credentialPath } from '../lib/identity.js'
@@ -1203,7 +1203,7 @@ test('launchClient starts a fresh client when nothing is in the way', async () =
   let stops = 0
   let up = false
   const ok = await launchClient(9222, {
-    existsSync: async () => true,
+    discover: async () => 'D:\\Doubao\\app\\Doubao.exe',
     spawn: async () => {
       spawns += 1
       up = true
@@ -1224,7 +1224,7 @@ test('launchClient restarts a stale client that ate the debugger flag', async ()
   let stops = 0
   let up = false
   const ok = await launchClient(9222, {
-    existsSync: async () => true,
+    discover: async () => 'D:\\Doubao\\app\\Doubao.exe',
     spawn: async () => {
       spawns += 1
       // The first launch joins an existing instance, so no bridge appears;
@@ -1245,10 +1245,34 @@ test('launchClient restarts a stale client that ate the debugger flag', async ()
 
 test('launchClient gives up quietly when the client is not installed', async () => {
   const ok = await launchClient(9222, {
-    existsSync: async () => false,
+    discover: async () => undefined,
     spawn: async () => {
       throw new Error('should not spawn')
     },
   })
   assert.equal(ok, false)
+})
+
+test('discoverClientExe accepts the path reported by the running process', async () => {
+  const exe = await discoverClientExe({
+    execFile: async () => ({ stdout: '  C:\\Program Files\\Doubao\\app\\Doubao.exe  \n' }),
+    exists: async (p) => p === 'C:\\Program Files\\Doubao\\app\\Doubao.exe',
+  })
+  assert.equal(exe, 'C:\\Program Files\\Doubao\\app\\Doubao.exe')
+})
+
+test('discoverClientExe falls back to a known install location', async () => {
+  const exe = await discoverClientExe({
+    execFile: async () => ({ stdout: '' }),
+    exists: async (p) => p.endsWith('Doubao\\app\\Doubao.exe'),
+  })
+  assert.match(exe, /Doubao\\app\\Doubao\.exe$/)
+})
+
+test('discoverClientExe reports nothing when no location exists', async () => {
+  const exe = await discoverClientExe({
+    execFile: async () => ({ stdout: '' }),
+    exists: async () => false,
+  })
+  assert.equal(exe, undefined)
 })
