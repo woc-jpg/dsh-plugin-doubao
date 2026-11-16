@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { Pacer, parseFrames, textOf, createTextTracker, buildQuery, buildBody, resolveModel, findModel, MODELS, createStreamChat } from '../lib/doubao.js'
-import { ensureBridge, forgetLaunchAttempts, launchClient, pickTarget, discoverClientExe } from '../lib/bridge.js'
+import { ensureBridge, forgetLaunchAttempts, launchClient, pickTarget, discoverClientExe, stopExistingClient } from '../lib/bridge.js'
 import { createAdapter, toPrompt, finishReasonFor, DEFAULT_PROVIDER, withRate, RATE_SEPARATOR, cleanForWire, isRefusal, MAX_PROMPT_CHARS } from '../lib/adapter.js'
 import { FALLBACK_RATES, rateFromTags, ratesFromBrief, fetchModelRates } from '../lib/rates.js'
 import { scanLocalStorage, toIdentity, findClientIdentity, credentialPath } from '../lib/identity.js'
@@ -142,7 +142,10 @@ test('finishReasonFor maps the codes the service actually returns', () => {
   const abort = Object.assign(new Error('gone'), { name: 'AbortError' })
   assert.equal(finishReasonFor(abort).kind, 'aborted')
   assert.equal(finishReasonFor(Object.assign(new Error('rate'), { code: 710022004 })).failure.code, 'RATE_LIMIT')
-  assert.equal(finishReasonFor(Object.assign(new Error('auth'), { code: 710012001 })).failure.code, 'AUTH')
+  const auth = finishReasonFor(Object.assign(new Error('auth expired'), { code: 710012001 }))
+  assert.equal(auth.failure.code, 'AUTH')
+  assert.match(auth.failure.message, /auth expired/, 'the raw service detail is preserved')
+  assert.match(auth.failure.message, /login/, 'an expired cookie carries re-login guidance')
   assert.equal(finishReasonFor(new Error('boom')).failure.code, 'DOUBAO_ERROR')
   // A bridge fault is purely local — the client page went away — so it must be
   // retryable, unlike RATE_LIMIT which retrying only deepens.
@@ -169,7 +172,22 @@ test('the catalog satisfies the host model contract', async () => {
     const efforts = info.reasoning.efforts
     assert.equal(new Set(efforts.map((e) => e.id)).size, efforts.length, 'effort ids must be unique')
     assert.ok(efforts.some((e) => e.id === info.reasoning.defaultEffort), 'defaultEffort must exist')
+    const wire = MODELS.find((m) => m.id === id)
+    if (wire.modeId === '1') {
+      assert.ok(efforts.some((e) => e.id === 'high'), `${id} is a chat model and must offer High`)
+    } else {
+      assert.deepEqual(efforts.map((e) => e.id), ['off'], `${id} is routed, so a High switch would do nothing`)
+    }
   }
+})
+
+test('a routed model rejects a High effort instead of silently ignoring it', async () => {
+  const adapter = createAdapter({ loadCredentials: async () => undefined })
+  const info = await adapter.resolveModel(DEFAULT_PROVIDER, 'glm-5.3-flash')
+  assert.deepEqual(info.reasoning.efforts.map((e) => e.id), ['off'])
+  // The dsh-llm layer validates against these efforts; a routed model has no
+  // High choice, so asking for one would be rejected as UNSUPPORTED_REASONING_EFFORT.
+  assert.ok(!info.reasoning.efforts.some((e) => e.id === 'high'))
 })
 
 test('providerInfo agrees with the provider id it is asked about', () => {
@@ -1255,6 +1273,7 @@ test('launchClient gives up quietly when the client is not installed', async () 
 
 test('discoverClientExe accepts the path reported by the running process', async () => {
   const exe = await discoverClientExe({
+    platform: 'win32',
     execFile: async () => ({ stdout: '  C:\\Program Files\\Doubao\\app\\Doubao.exe  \n' }),
     exists: async (p) => p === 'C:\\Program Files\\Doubao\\app\\Doubao.exe',
   })
@@ -1263,6 +1282,7 @@ test('discoverClientExe accepts the path reported by the running process', async
 
 test('discoverClientExe falls back to a known install location', async () => {
   const exe = await discoverClientExe({
+    platform: 'win32',
     execFile: async () => ({ stdout: '' }),
     exists: async (p) => p.endsWith('Doubao\\app\\Doubao.exe'),
   })
@@ -1271,8 +1291,51 @@ test('discoverClientExe falls back to a known install location', async () => {
 
 test('discoverClientExe reports nothing when no location exists', async () => {
   const exe = await discoverClientExe({
+    platform: 'win32',
     execFile: async () => ({ stdout: '' }),
     exists: async () => false,
   })
   assert.equal(exe, undefined)
+})
+
+test('discoverClientExe finds the macOS app through Spotlight', async () => {
+  const app = '/Users/me/Applications/Doubao.app'
+  const exe = await discoverClientExe({
+    platform: 'darwin',
+    execFile: async (file) => {
+      if (file === 'mdfind') return { stdout: app + '\n' }
+      throw new Error('should not reach other probes')
+    },
+    exists: async (p) => p === app + '/Contents/MacOS/Doubao',
+  })
+  assert.equal(exe, app + '/Contents/MacOS/Doubao')
+})
+
+test('discoverClientExe finds the Linux client on PATH', async () => {
+  const exe = await discoverClientExe({
+    platform: 'linux',
+    execFile: async (file) => {
+      if (file === 'which') return { stdout: '/usr/bin/doubao\n' }
+      throw new Error('should not reach other probes')
+    },
+    exists: async (p) => p === '/usr/bin/doubao',
+  })
+  assert.equal(exe, '/usr/bin/doubao')
+})
+
+test('stopExistingClient uses taskkill on Windows and pkill elsewhere', async () => {
+  const calls = []
+  const execFile = async (file, args) => {
+    calls.push([file, args])
+    throw new Error('no process')
+  }
+  await stopExistingClient({ execFile, platform: 'win32' })
+  await stopExistingClient({ execFile, platform: 'darwin' })
+  await stopExistingClient({ execFile, platform: 'linux' })
+  assert.equal(calls[0][0], 'taskkill')
+  assert.match(calls[0][1][2], /Doubao\.exe/)
+  assert.equal(calls[1][0], 'pkill')
+  assert.equal(calls[1][1][1], 'Doubao')
+  assert.equal(calls[2][0], 'pkill')
+  assert.equal(calls[2][1][1], 'doubao')
 })

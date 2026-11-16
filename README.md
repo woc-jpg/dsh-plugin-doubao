@@ -91,7 +91,10 @@ device id out of the **installed Doubao desktop client's** `Local State` file, a
 session from your scan. That means:
 
 - **The Doubao desktop client must be installed and signed in at least once** on the same machine.
-  Without it there is no device id to use.
+  Without it there is no device id to use. The client is supported on Windows, macOS and Linux; the
+  plugin finds it from the running process, the OS install record (Windows registry / macOS Spotlight),
+  or the usual install locations, so a non-default install path is fine. Stopping a stale instance
+  uses `taskkill` on Windows and `pkill` on the other two.
 - Signing in on a different machine than the one that runs DSH will not work; run `login` where DSH
   runs.
 
@@ -337,9 +340,11 @@ Three details are deliberate:
 - **Token counts are estimates.** The endpoint returns no usage block, so counts are derived from
   character length (roughly two characters per token). Good enough for a meter, not for billing.
 - **The thinking toggle only reaches the chat models.** `doubao` and `doubao-expert` take a
-  `need_deep_think` flag, so the harness reasoning setting applies to them. For the routed models the
-  thinking depth is part of the model definition — `GLM 5.3` is not `GLM 5.3` with thinking off — so
-  the flag is fixed and the reasoning selector does nothing.
+  `need_deep_think` flag, so the harness reasoning setting applies to them and they expose Off/High.
+  For the routed models the thinking depth is part of the model definition — `GLM 5.3` is not `GLM 5.3`
+  with thinking off — so the flag is fixed. Those models advertise only the Off effort rather than a
+  High switch that would silently do nothing; a stale High request is rejected as unsupported instead
+  of being quietly ignored.
 - **No conversation continuity.** Each turn is a fresh conversation on Doubao's side, because the
   endpoint is stateless per request and passing a conversation id back would require server-side state
   the harness does not give the adapter.
