@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { Pacer, parseFrames, textOf, createTextTracker, buildQuery, buildBody, resolveModel, findModel, MODELS, createStreamChat } from '../lib/doubao.js'
 import { ensureBridge, forgetLaunchAttempts, launchClient, pickTarget, discoverClientExe, stopExistingClient } from '../lib/bridge.js'
 import { createAdapter, toPrompt, finishReasonFor, DEFAULT_PROVIDER, withRate, RATE_SEPARATOR, cleanForWire, isRefusal, MAX_PROMPT_CHARS } from '../lib/adapter.js'
+import { createRiskMemory, DEFAULT_TTL_MS } from '../lib/risk-memory.js'
 import { FALLBACK_RATES, rateFromTags, ratesFromBrief, fetchModelRates } from '../lib/rates.js'
 import { scanLocalStorage, toIdentity, findClientIdentity, credentialPath, candidateUserDataDirs } from '../lib/identity.js'
 import { readCredentials, writeCredentials, parseHint, credentialsPath } from '../lib/login.js'
@@ -506,6 +507,9 @@ test('a risk-control refusal is reported as an error finish, not thrown', async 
       loadCredentials: async () => ({ cookies: 'a=b', identity: IDENTITY }),
       logger: { warn() {} },
       pacer: spy,
+      // Keep this test on the direct path: a risk refusal here must become a
+      // RATE_LIMIT finish, not trigger a real bridge fallback.
+      allowBridge: false,
     })
     const seen = []
     for await (const chunk of adapter.stream({ model: 'doubao', messages: [{ role: 'user', content: [] }] })) {
@@ -1016,17 +1020,54 @@ test('parseHint cleans the emphasis markup out of the server copy', () => {
 
 // ------------------------------------------------------------- the client bridge
 
-test('a reachable client signs the request, so the plain fetch is skipped', async () => {
+test('a clean direct answer never opens the bridge', async () => {
+  const original = globalThis.fetch
+  let bridgeOpened = false
+  globalThis.fetch = async () => ({
+    ok: true,
+    body: (async function* () {
+      yield Buffer.from('event: CHUNK_DELTA\ndata: {"text":"7"}\n\n', 'utf8')
+      yield Buffer.from('event: SSE_REPLY_END\ndata: {"end_type":1}\n\n', 'utf8')
+    })(),
+  })
+  try {
+    const streamChat = createStreamChat({
+      available: async () => { throw new Error('the client must not even be probed on a clean turn') },
+      ensure: async () => { throw new Error('the client must not be launched on a clean turn') },
+      stream: async function* () {
+        bridgeOpened = true
+      },
+    })
+    let text = ''
+    for await (const ev of streamChat({ identity: IDENTITY, cookies: 'a=b', text: 'q', model: 'doubao' })) {
+      if (ev.type === 'delta') text += ev.text
+    }
+    assert.equal(text, '7')
+    assert.equal(bridgeOpened, false, 'a clean account must never pull up the client')
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('a risk hit falls back to the signed bridge instead of losing the answer', async () => {
   const original = globalThis.fetch
   let fetched = 0
   globalThis.fetch = async () => {
     fetched += 1
-    throw new Error('the unsigned path must not be used while a client is reachable')
+    return { ok: false, status: 710022004, text: async () => 'rate limited' }
   }
   const calls = []
+  const flags = new Set()
+  const riskMemory = {
+    isFlagged: (k) => flags.has(k),
+    mark: (k) => flags.add(k),
+    clear: (k) => flags.delete(k),
+    snapshot: () => [...flags],
+  }
   try {
     const streamChat = createStreamChat({
-      available: async () => true,
+      ensure: async () => true,
+      riskMemory,
       stream: async function* ({ url, body, port }) {
         calls.push({ url, body, port })
         yield 'event: SSE_ACK\ndata: {"ack_client_meta":{"conversation_id":"c9"}}\n\n'
@@ -1036,17 +1077,14 @@ test('a reachable client signs the request, so the plain fetch is skipped', asyn
     })
     const seen = []
     for await (const ev of streamChat({
-      identity: IDENTITY,
-      cookies: 'a=b',
-      text: 'q',
-      model: 'doubao',
+      identity: IDENTITY, cookies: 'a=b', text: 'q', model: 'doubao', riskKey: 'device-x',
     })) {
       seen.push(ev)
     }
-    assert.equal(fetched, 0, 'the bridge must carry the request on its own')
-    assert.equal(calls.length, 1)
+    assert.equal(fetched, 1, 'the direct path is probed first')
+    assert.equal(calls.length, 1, 'the signed bridge carries the retry')
     assert.equal(calls[0].port, 9222, 'the default debugger port is used when none is configured')
-    assert.ok(calls[0].body.includes('"q"'))
+    assert.ok(flags.has('device-x'), 'the risk is remembered so later turns skip the doomed probe')
     assert.equal(seen.find((e) => e.type === 'meta')?.conversationId, 'c9')
     assert.equal(seen.filter((e) => e.type === 'delta').map((e) => e.text).join(''), '7')
   } finally {
@@ -1092,27 +1130,33 @@ test('without a client the request falls back to the plain endpoint', async () =
 })
 
 test('a bridge that dies mid-flight is reported as a bridge fault, not a rate limit', async () => {
-  const streamChat = createStreamChat({
-    available: async () => true,
-    stream: async function* () {
-      yield 'event: CHUNK_DELTA\ndata: {"text":"par"}\n\n'
-      throw new Error('cdp socket closed')
-    },
-  })
-  const seen = []
-  for await (const ev of streamChat({
-    identity: IDENTITY,
-    cookies: 'a=b',
-    text: 'q',
-    model: 'doubao',
-  })) {
-    seen.push(ev)
+  const original = globalThis.fetch
+  globalThis.fetch = async () => ({ ok: false, status: 710022004, text: async () => 'rate limited' })
+  const flags = new Set()
+  const riskMemory = { isFlagged: (k) => flags.has(k), mark: (k) => flags.add(k), clear: (k) => flags.delete(k), snapshot: () => [...flags] }
+  try {
+    const streamChat = createStreamChat({
+      ensure: async () => true,
+      riskMemory,
+      stream: async function* () {
+        yield 'event: CHUNK_DELTA\ndata: {"text":"par"}\n\n'
+        throw new Error('cdp socket closed')
+      },
+    })
+    const seen = []
+    for await (const ev of streamChat({
+      identity: IDENTITY, cookies: 'a=b', text: 'q', model: 'doubao',
+    })) {
+      seen.push(ev)
+    }
+    const error = seen.find((e) => e.type === 'error')
+    // Calling this a rate limit would send the host down a retry path that can
+    // only make the real problem worse, and would mislabel a local fault.
+    assert.equal(error?.code, 'BRIDGE')
+    assert.match(error.message, /cdp socket closed/)
+  } finally {
+    globalThis.fetch = original
   }
-  const error = seen.find((e) => e.type === 'error')
-  // Calling this a rate limit would send the host down a retry path that can
-  // only make the real problem worse, and would mislabel a local fault.
-  assert.equal(error?.code, 'BRIDGE')
-  assert.match(error.message, /cdp socket closed/)
 })
 
 test('the bridge can be switched off for a call that must go direct', async () => {
@@ -1372,4 +1416,116 @@ test('stopExistingClient uses taskkill on Windows and pkill elsewhere', async ()
   assert.equal(calls[1][1][1], 'Doubao')
   assert.equal(calls[2][0], 'pkill')
   assert.equal(calls[2][1][1], 'doubao')
+})
+
+
+// ------------------------------------------------------- risk memory & direct-first
+
+test('risk memory persists across instances and expires on time', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-risk-'))
+  const file = join(dir, 'nested', 'risk-flags.json')
+  try {
+    let clock = 1_000
+    const a = createRiskMemory({ file, now: () => clock, ttlMs: 1_000 })
+    assert.equal(a.isFlagged('dev-1'), false)
+    a.mark('dev-1')
+    assert.equal(a.isFlagged('dev-1'), true)
+    assert.equal(readFileSync(file, 'utf8'), JSON.stringify({ 'dev-1': 2_000 }))
+
+    // A fresh instance simulates a DSH restart: the flag survives.
+    const b = createRiskMemory({ file, now: () => clock, ttlMs: 1_000 })
+    assert.equal(b.isFlagged('dev-1'), true, 'restart does not forget the risk flag')
+
+    clock = 2_001
+    assert.equal(b.isFlagged('dev-1'), false, 'an expired flag clears itself')
+    assert.deepEqual(b.snapshot(), {})
+
+    b.mark('dev-2')
+    b.clear('dev-2')
+    assert.deepEqual(b.snapshot(), {})
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('risk memory tolerates a corrupt file and starts clean', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-risk-'))
+  const file = join(dir, 'risk-flags.json')
+  try {
+    writeFileSync(file, '{not json')
+    const m = createRiskMemory({ file })
+    assert.deepEqual(m.snapshot(), {})
+    assert.equal(m.isFlagged('anything'), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a flagged account skips the direct probe entirely and goes to the bridge', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = async () => {
+    throw new Error('a flagged account must not retry the doomed direct request')
+  }
+  const flags = new Set(['dev-x'])
+  const riskMemory = {
+    isFlagged: (k) => flags.has(k),
+    mark: (k) => flags.add(k),
+    clear: (k) => flags.delete(k),
+    snapshot: () => [...flags],
+  }
+  let opened = 0
+  try {
+    const streamChat = createStreamChat({
+      riskMemory,
+      ensure: async () => true,
+      stream: async function* () {
+        opened += 1
+        yield 'event: CHUNK_DELTA\ndata: {"text":"桥"}\n\n'
+        yield 'event: SSE_REPLY_END\ndata: {"end_type":1}\n\n'
+      },
+    })
+    let text = ''
+    for await (const ev of streamChat({
+      identity: IDENTITY, cookies: 'a=b', text: 'q', model: 'doubao', riskKey: 'dev-x',
+    })) {
+      if (ev.type === 'delta') text += ev.text
+    }
+    assert.equal(text, '桥')
+    assert.equal(opened, 1)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('allowBridge=false keeps a flagged turn direct and never starts a client', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = async () => ({
+    ok: false, status: 710022004, text: async () => 'rate limited',
+  })
+  const flags = new Set(['dev-y'])
+  const riskMemory = {
+    isFlagged: (k) => flags.has(k),
+    mark: (k) => flags.add(k),
+    clear: (k) => flags.delete(k),
+    snapshot: () => [...flags],
+  }
+  let touched = false
+  try {
+    const streamChat = createStreamChat({
+      riskMemory,
+      ensure: async () => { touched = true; return true },
+      stream: async function* () { touched = true },
+    })
+    const seen = []
+    for await (const ev of streamChat({
+      identity: IDENTITY, cookies: 'a=b', text: 'q', model: 'doubao',
+      riskKey: 'dev-y', bridge: false,
+    })) {
+      seen.push(ev)
+    }
+    assert.equal(touched, false, 'the client must stay untouched')
+    assert.equal(seen[0]?.code, 710022004, 'the risk result is reported, not hidden')
+  } finally {
+    globalThis.fetch = original
+  }
 })
