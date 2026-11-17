@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 
 import { Pacer, parseFrames, textOf, createTextTracker, buildQuery, buildBody, resolveModel, findModel, MODELS, createStreamChat } from '../lib/doubao.js'
 import { ensureBridge, forgetLaunchAttempts, launchClient, pickTarget, discoverClientExe, stopExistingClient } from '../lib/bridge.js'
-import { createAdapter, toPrompt, finishReasonFor, DEFAULT_PROVIDER, withRate, RATE_SEPARATOR, cleanForWire, isRefusal, MAX_PROMPT_CHARS } from '../lib/adapter.js'
+import { createAdapter, toPrompt, finishReasonFor, DEFAULT_PROVIDER, withRate, RATE_SEPARATOR, cleanForWire, isRefusal, MAX_PROMPT_CHARS, activeTools, toolInstructions, heldMarkerPrefix, ToolCallStream, TOOL_CALL_OPEN, TOOL_CALL_CLOSE } from '../lib/adapter.js'
 import { createRiskMemory, DEFAULT_TTL_MS } from '../lib/risk-memory.js'
 import { FALLBACK_RATES, rateFromTags, ratesFromBrief, fetchModelRates } from '../lib/rates.js'
 import { scanLocalStorage, toIdentity, findClientIdentity, credentialPath, candidateUserDataDirs } from '../lib/identity.js'
@@ -1528,4 +1528,216 @@ test('allowBridge=false keeps a flagged turn direct and never starts a client', 
   } finally {
     globalThis.fetch = original
   }
+})
+
+// ---------------------------------------------------------------- tool calling
+
+const TOOLS = [
+  {
+    name: 'run_command',
+    description: 'Run a terminal command and return its output.',
+    parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
+  },
+  {
+    name: 'read_file',
+    description: 'Read a file.',
+    parameters: { type: 'object', properties: { path: { type: 'string' } } },
+  },
+]
+
+test('activeTools drops deferred and nameless tools', () => {
+  const active = activeTools([...TOOLS, { name: 'later', deferLoading: true }, { description: 'no name' }, null])
+  assert.deepEqual(active.map((t) => t.name), ['run_command', 'read_file'])
+})
+
+test('toolInstructions advertises the exact names and the marker protocol', () => {
+  const text = toolInstructions(TOOLS)
+  assert.match(text, /run_command/)
+  assert.match(text, /read_file/)
+  assert.match(text, /"parameters"/)
+  assert.ok(text.includes(TOOL_CALL_OPEN), 'the opening marker must be shown to the model')
+  assert.ok(text.includes(TOOL_CALL_CLOSE), 'the closing marker must be shown to the model')
+  assert.match(text, /exactly/)
+})
+
+test('heldMarkerPrefix holds only a genuine partial marker', () => {
+  assert.equal(heldMarkerPrefix('hello', TOOL_CALL_OPEN), 0)
+  assert.equal(heldMarkerPrefix('hello [TOOL_CA', TOOL_CALL_OPEN), '[TOOL_CA'.length)
+  assert.equal(heldMarkerPrefix(TOOL_CALL_OPEN, TOOL_CALL_OPEN), 0, 'a complete marker is not a held suffix')
+  assert.equal(heldMarkerPrefix('x TOOL_CALL]', TOOL_CALL_OPEN), 0)
+})
+
+test('ToolCallStream is a transparent passthrough when there are no tools', () => {
+  const s = new ToolCallStream({ tools: [] })
+  assert.deepEqual([...s.feed('hello ')], [{ type: 'text', text: 'hello ' }])
+  assert.deepEqual([...s.feed(`${TOOL_CALL_OPEN}{"name":"x"}${TOOL_CALL_CLOSE}`)], [
+    { type: 'text', text: `${TOOL_CALL_OPEN}{"name":"x"}${TOOL_CALL_CLOSE}` },
+  ])
+  assert.deepEqual([...s.end()], [])
+  assert.equal(s.hasCalls, false)
+})
+
+function collectChunks(gen) {
+  return [...gen]
+}
+
+test('ToolCallStream turns a complete marker into a tool-call block', () => {
+  const s = new ToolCallStream({ tools: TOOLS, allocIndex: () => 5 })
+  const out = [
+    ...collectChunks(s.feed(`I will check.${TOOL_CALL_OPEN}{"name":"run_command","arguments":{"command":"echo hi"}}${TOOL_CALL_CLOSE} done`)),
+    ...collectChunks(s.end()),
+  ]
+  const text = out.filter((c) => c.type === 'text').map((c) => c.text).join('')
+  assert.equal(text, 'I will check. done')
+  const start = out.find((c) => c.type === 'block-start')
+  const delta = out.find((c) => c.type === 'tool-call-delta')
+  const end = out.find((c) => c.type === 'block-end')
+  assert.deepEqual(start, { type: 'block-start', index: 5, blockType: 'tool-call' })
+  assert.equal(delta.name, 'run_command')
+  assert.equal(delta.argumentsDelta, '{"command":"echo hi"}')
+  assert.equal(delta.id, 'call-5')
+  assert.deepEqual(end.block, { type: 'tool-call', id: 'call-5', name: 'run_command', arguments: '{"command":"echo hi"}' })
+  assert.equal(s.hasCalls, true)
+})
+
+test('ToolCallStream reassembles a marker split across deltas', () => {
+  const s = new ToolCallStream({ tools: TOOLS, allocIndex: () => 0 })
+  const marker = `${TOOL_CALL_OPEN}{"name":"read_file","arguments":{"path":"/etc/hosts"}}${TOOL_CALL_CLOSE}`
+  const out = []
+  for (const ch of marker) out.push(...s.feed(ch))
+  out.push(...s.end())
+  assert.equal(out.filter((c) => c.type === 'text').map((c) => c.text).join(''), '')
+  const delta = out.find((c) => c.type === 'tool-call-delta')
+  assert.equal(delta.name, 'read_file')
+  assert.equal(delta.argumentsDelta, '{"path":"/etc/hosts"}')
+})
+
+test('ToolCallStream gives multiple calls distinct indexes', () => {
+  let cursor = 0
+  const s = new ToolCallStream({ tools: TOOLS, allocIndex: () => cursor++ })
+  const out = [
+    ...s.feed(`${TOOL_CALL_OPEN}{"name":"run_command","arguments":{}}${TOOL_CALL_CLOSE}`),
+    ...s.feed(`${TOOL_CALL_OPEN}{"name":"read_file","arguments":{}}${TOOL_CALL_CLOSE}`),
+    ...s.end(),
+  ]
+  const starts = out.filter((c) => c.type === 'block-start')
+  assert.deepEqual(starts.map((c) => c.index), [0, 1])
+  assert.equal(s.hasCalls, true)
+})
+
+test('ToolCallStream shows a malformed payload verbatim instead of losing it', () => {
+  const s = new ToolCallStream({ tools: TOOLS, allocIndex: () => 0 })
+  const bad = `${TOOL_CALL_OPEN}not json${TOOL_CALL_CLOSE}`
+  const out = [...s.feed(bad), ...s.end()]
+  assert.equal(out.filter((c) => c.type === 'text').map((c) => c.text).join(''), bad)
+  assert.equal(s.hasCalls, false, 'a malformed marker is not a tool call')
+})
+
+test('ToolCallStream shows an unclosed marker at end-of-stream', () => {
+  const s = new ToolCallStream({ tools: TOOLS, allocIndex: () => 0 })
+  const partial = 'please ' + TOOL_CALL_OPEN + '{"name":"run_command"'
+  const out = [...s.feed(partial), ...s.end()]
+  const text = out.filter((c) => c.type === 'text').map((c) => c.text).join('')
+  assert.ok(text.includes('please'), 'text before the marker is preserved')
+  assert.ok(text.includes(TOOL_CALL_OPEN), 'the unclosed marker is shown, not swallowed')
+  assert.equal(s.hasCalls, false)
+})
+
+test('toPrompt injects tool instructions and keeps them when trimming', () => {
+  const messages = [
+    { role: 'system', content: [{ type: 'text', text: 'be brief' }] },
+    ...Array.from({ length: 20 }, (_, i) => ({ role: 'assistant', content: [{ type: 'text', text: `old turn ${i} ` + 'y'.repeat(80) }] })),
+    { role: 'user', content: [{ type: 'text', text: 'run echo hi' }] },
+  ]
+  const prompt = toPrompt(messages, { tools: TOOLS, maxChars: 1400 })
+  assert.match(prompt, /\[Tool instructions\]/)
+  assert.match(prompt, /run_command/)
+  assert.match(prompt, /earlier turns omitted/, 'a trimmed history must still carry the tool definitions')
+  assert.match(prompt, /run echo hi/, 'the latest question must survive trimming')
+  assert.ok(prompt.length <= 1400)
+})
+
+test('toPrompt never cuts a tool definition in half on a tiny budget', () => {
+  const prompt = toPrompt(
+    [{ role: 'user', content: [{ type: 'text', text: 'q' }] }],
+    { tools: TOOLS, maxChars: 120 },
+  )
+  assert.match(prompt, /\[Tool instructions\]/)
+  assert.ok(prompt.includes('TOOL DEFINITIONS (JSON):'), 'the essential preamble stays intact')
+  assert.ok(prompt.includes(TOOL_CALL_CLOSE), 'the closing marker in the protocol stays intact')
+  assert.ok(!prompt.includes('earlier turns omitted'), 'no degenerate marker when the essentials fill the budget')
+})
+
+test('an adapter tool call emits tool-call chunks and finishes with tool-calls', async () => {
+  const original = globalThis.fetch
+  const callText = `${TOOL_CALL_OPEN}{"name":"run_command","arguments":{"command":"echo hi"}}${TOOL_CALL_CLOSE}`
+  globalThis.fetch = fakeFetch([
+    'event: SSE_ACK\ndata: {"ack_client_meta":{"conversation_id":"c1"}}\n\n',
+    `event: CHUNK_DELTA\ndata: ${JSON.stringify({ text: callText.slice(0, 20) })}\n\n`,
+    `event: CHUNK_DELTA\ndata: ${JSON.stringify({ text: callText.slice(20) })}\n\n`,
+    'event: SSE_REPLY_END\ndata: {"end_type":1}\n\n',
+  ])
+  let sentPrompt = ''
+  try {
+    const adapter = createAdapter({
+      loadCredentials: async () => ({ cookies: 'a=b', identity: IDENTITY }),
+      logger: { warn() {} },
+    })
+    const seen = []
+    for await (const chunk of adapter.stream({
+      model: 'doubao',
+      tools: TOOLS,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'say hi via echo' }] }],
+    })) {
+      seen.push(chunk)
+    }
+    const delta = seen.find((c) => c.type === 'tool-call-delta')
+    assert.ok(delta, 'a tool-call-delta must be emitted')
+    assert.equal(delta.name, 'run_command')
+    assert.equal(delta.argumentsDelta, '{"command":"echo hi"}')
+    const finish = seen.find((c) => c.type === 'finish')
+    assert.equal(finish.reason.kind, 'tool-calls', 'the agent loop runs tool blocks only on this finish kind')
+    const usageAt = seen.findIndex((c) => c.type === 'usage')
+    const finishAt = seen.findIndex((c) => c.type === 'finish')
+    assert.ok(usageAt >= 0 && usageAt < finishAt)
+    assert.equal(seen.filter((c) => c.type === 'text-delta').map((c) => c.text).join(''), '', 'no stray marker text leaks')
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('a tools-enabled turn with no call still finishes with stop', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = fakeFetch([
+    `event: CHUNK_DELTA\ndata: ${JSON.stringify({ text: 'just an answer' })}\n\n`,
+    'event: SSE_REPLY_END\ndata: {"end_type":1}\n\n',
+  ])
+  try {
+    const adapter = createAdapter({
+      loadCredentials: async () => ({ cookies: 'a=b', identity: IDENTITY }),
+      logger: { warn() {} },
+    })
+    const seen = []
+    for await (const chunk of adapter.stream({
+      model: 'doubao',
+      tools: TOOLS,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    })) {
+      seen.push(chunk)
+    }
+    assert.equal(seen.filter((c) => c.type === 'text-delta').map((c) => c.text).join(''), 'just an answer')
+    assert.equal(seen.find((c) => c.type === 'finish').reason.kind, 'stop')
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('tool result messages are fed back into the next prompt', () => {
+  const prompt = toPrompt([
+    { role: 'user', content: [{ type: 'text', text: 'run echo hi' }] },
+    { role: 'assistant', content: [{ type: 'text', text: `${TOOL_CALL_OPEN}{"name":"run_command","arguments":{}}${TOOL_CALL_CLOSE}` }] },
+    { role: 'tool', content: [{ type: 'text', text: 'hi' }] },
+  ])
+  assert.match(prompt, /\[Assistant\]/)
+  assert.match(prompt, /\[Tool result\]\nhi/)
 })

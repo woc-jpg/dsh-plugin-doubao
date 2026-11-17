@@ -356,8 +356,14 @@ Three details are deliberate:
 ## Limitations
 
 - **Text only.** Doubao's web endpoint accepts no images here, so nothing advertises image input.
-- **No tool calling.** The harness tool loop needs a tool-call protocol this endpoint does not speak;
-  the plugin flattens the conversation into a single prompt instead.
+- **Tool calling is a prompt bridge, not a native capability.** `www.doubao.com/chat/completion`
+  has no `tools`/`function_call` field (that lives on the paid Volcengine Ark API), so the plugin
+  serialises the harness tool schemas into the prompt and asks the model to answer with a strict
+  `[TOOL_CALL]{"name":…,"arguments":{…}}[/TOOL_CALL]` marker. Those markers are translated back into
+  the harness `tool-call` chunk protocol and the agent loop executes them locally — so Doubao models
+  can run terminal commands, read files and use the other harness tools. This is model-compliance
+  dependent: if the model ignores the marker or writes a malformed one, the turn is rendered as plain
+  text instead of a call. Turns with no tools configured are byte-for-byte unchanged.
 - **Token counts are estimates.** The endpoint returns no usage block, so counts are derived from
   character length (roughly two characters per token). Good enough for a meter, not for billing.
 - **The thinking toggle only reaches the chat models.** `doubao` and `doubao-expert` take a
