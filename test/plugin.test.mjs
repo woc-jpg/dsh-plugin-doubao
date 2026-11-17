@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 
 import { Pacer, parseFrames, textOf, createTextTracker, buildQuery, buildBody, resolveModel, findModel, MODELS, createStreamChat } from '../lib/doubao.js'
 import { ensureBridge, forgetLaunchAttempts, launchClient, pickTarget, discoverClientExe, stopExistingClient } from '../lib/bridge.js'
-import { createAdapter, toPrompt, finishReasonFor, DEFAULT_PROVIDER, withRate, RATE_SEPARATOR, cleanForWire, isRefusal, MAX_PROMPT_CHARS, activeTools, toolInstructions, heldMarkerPrefix, ToolCallStream, TOOL_CALL_OPEN, TOOL_CALL_CLOSE } from '../lib/adapter.js'
+import { createAdapter, toPrompt, finishReasonFor, DEFAULT_PROVIDER, withRate, RATE_SEPARATOR, cleanForWire, isRefusal, MAX_PROMPT_CHARS, activeTools, toolInstructions, heldMarkerPrefix, ToolCallStream, TOOL_CALL_OPEN, TOOL_CALL_CLOSE, TOOL_CALL_REMINDER } from '../lib/adapter.js'
 import { createRiskMemory, DEFAULT_TTL_MS } from '../lib/risk-memory.js'
 import { FALLBACK_RATES, rateFromTags, ratesFromBrief, fetchModelRates } from '../lib/rates.js'
 import { scanLocalStorage, toIdentity, findClientIdentity, credentialPath, candidateUserDataDirs } from '../lib/identity.js'
@@ -1649,12 +1649,13 @@ test('toPrompt injects tool instructions and keeps them when trimming', () => {
     ...Array.from({ length: 20 }, (_, i) => ({ role: 'assistant', content: [{ type: 'text', text: `old turn ${i} ` + 'y'.repeat(80) }] })),
     { role: 'user', content: [{ type: 'text', text: 'run echo hi' }] },
   ]
-  const prompt = toPrompt(messages, { tools: TOOLS, maxChars: 1400 })
+  const prompt = toPrompt(messages, { tools: TOOLS, maxChars: 2000 })
   assert.match(prompt, /\[Tool instructions\]/)
   assert.match(prompt, /run_command/)
   assert.match(prompt, /earlier turns omitted/, 'a trimmed history must still carry the tool definitions')
   assert.match(prompt, /run echo hi/, 'the latest question must survive trimming')
-  assert.ok(prompt.length <= 1400)
+  assert.match(prompt, /If this task needs an action/, 'the tail call reminder survives trimming too')
+  assert.ok(prompt.length <= 2000)
 })
 
 test('toPrompt never cuts a tool definition in half on a tiny budget', () => {
@@ -1666,6 +1667,35 @@ test('toPrompt never cuts a tool definition in half on a tiny budget', () => {
   assert.ok(prompt.includes('TOOL DEFINITIONS (JSON):'), 'the essential preamble stays intact')
   assert.ok(prompt.includes(TOOL_CALL_CLOSE), 'the closing marker in the protocol stays intact')
   assert.ok(!prompt.includes('earlier turns omitted'), 'no degenerate marker when the essentials fill the budget')
+})
+
+test('toPrompt puts the call reminder last without displacing the latest question', () => {
+  const question = 'PLEASE_RUN_ECHO_REMINDER_TAIL_OK'
+  const messages = [
+    { role: 'system', content: [{ type: 'text', text: 'be brief' }] },
+    ...Array.from({ length: 20 }, (_, i) => ({ role: 'assistant', content: [{ type: 'text', text: `old ${i} ` + 'z'.repeat(80) }] })),
+    { role: 'user', content: [{ type: 'text', text: question }] },
+  ]
+  const prompt = toPrompt(messages, { tools: TOOLS, maxChars: 1600 })
+  assert.match(prompt, /\[Tool instructions\]/)
+  assert.match(prompt, /earlier turns omitted/)
+  assert.ok(prompt.includes(question), 'the latest question must survive even with the tail reminder')
+  assert.ok(prompt.trimEnd().endsWith(TOOL_CALL_REMINDER.trim().split('\n').at(-1)), 'the call reminder stays last')
+  assert.ok(prompt.length <= 1600)
+})
+
+test('toPrompt keeps the latest question even when tool definitions alone exceed the budget', () => {
+  // Real GUI sessions carry ~59 tool definitions (~50k chars) under a 32000
+  // char budget. When the essential head fills the budget, dropping the rest
+  // leaves the model staring at a toolbox with no question — it answers
+  // "just send your request" and no tool is ever executed.
+  const question = 'UNIQUE_QUESTION_k7Q2_exec_echo_OK'
+  const prompt = toPrompt(
+    [{ role: 'user', content: [{ type: 'text', text: question }] }],
+    { tools: TOOLS, maxChars: 120 },
+  )
+  assert.ok(prompt.includes('[Tool instructions]'), 'the tool definitions are present')
+  assert.ok(prompt.includes(question), 'the newest user message must survive even over budget')
 })
 
 test('an adapter tool call emits tool-call chunks and finishes with tool-calls', async () => {
