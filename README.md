@@ -52,13 +52,13 @@ there. `pnpm` resolves a git URL directly, and the login helper is run from the 
 repository:
 
 ```bash
-git clone https://github.com/<owner>/dsh-plugin-doubao.git
+git clone https://github.com/woc-jpg/dsh-plugin-doubao.git
 cd dsh-plugin-doubao
-dsh plugin --profile web add github:<owner>/dsh-plugin-doubao
+dsh plugin --profile web add github:woc-jpg/dsh-plugin-doubao
 node bin/login.js
 ```
 
-Replace `<owner>` with the account that hosts this repo. `dsh plugin add` installs the package and
+`dsh plugin add` installs the package and
 activates it as a profile bundle automatically (the package declares `dsh.bundle.patch`). Restart
 DSH, then choose a Doubao model. The login step is only needed once; the session is cached in
 `~/.dsh/doubao-local/credentials.json`.
@@ -68,7 +68,7 @@ that profile). Add the dependency to the profile's `package.json` by hand and ru
 there instead:
 
 ```json
-"dsh-plugin-doubao": "github:<owner>/dsh-plugin-doubao"
+"dsh-plugin-doubao": "github:woc-jpg/dsh-plugin-doubao"
 ```
 
 and add `"dsh-plugin-doubao"` to `dsh.profile.bundles` in the same file.
