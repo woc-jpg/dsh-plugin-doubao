@@ -116,6 +116,19 @@ QR code — no browser, no file manager, no command line. Scan it with the Douyi
 the button turns green, and you can start picking Doubao models right away. The modal
 shows the live scan status and a **重新扫码 / Re-scan** button if the code expires.
 
+Already signed in? The panel says **已经登录 / Already signed in** and shows no QR. That
+is deliberate: a QR for an account that is already connected only invites a pointless
+second scan. Use **重新扫码 / Re-scan** if you want to switch accounts.
+
+If the panel is blank, or a button seems to do nothing, check the version first — the
+old 0.2.2 build borrowed DSH theme tokens that do not exist, which renders a white box
+with white text on a light UI. Anything from 0.2.5 on paints its own palette and reports
+failures in the panel instead of swallowing them:
+
+```bash
+dsh plugin --profile desktop add dsh-plugin-doubao@latest
+```
+
 **Also available — a standalone command / double-click launcher.** The package ships a
 `dsh-plugin-doubao` command and a `bin/login.bat` that open the same QR in a browser.
 Use these if the DSH panel is unavailable or you are signing in before DSH is installed.
