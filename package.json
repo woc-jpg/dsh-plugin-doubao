@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-doubao",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Doubao models in DSH, self-contained: talks to doubao.com over plain HTTP and registers itself as an LLM provider. No proxy to start — sign in once with a QR code.",
   "type": "module",
   "license": "MIT",
@@ -19,6 +19,10 @@
   "engines": {
     "node": ">=22"
   },
+  "scripts": {
+    "test": "node --test",
+    "prepack": "node --test test/manifest.test.mjs"
+  },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",
     "access": "public"
@@ -27,6 +31,7 @@
     "lib",
     "bin",
     "cordis.patch.yml",
+    "docs",
     "README.md"
   ],
   "keywords": [

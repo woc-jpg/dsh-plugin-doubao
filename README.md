@@ -131,6 +131,14 @@ failures in the panel instead of swallowing them:
 dsh plugin --profile desktop add dsh-plugin-doubao@latest
 ```
 
+**Use 0.2.6, not 0.2.5.** Those two are the same code, but the 0.2.5 tarball shipped a
+`package.json` with a UTF-8 byte-order mark at the front. `JSON.parse` rejects it, DSH's
+profile loader catches the throw and silently skips the whole bundle, so the plugin never
+runs and the Doubao models simply are not in the picker — no error, no log line, nothing
+to search for. 0.2.6 is that file with the three bytes stripped. Install `@latest` or
+`@^0.2.6`; if you already have 0.2.5, upgrade, or delete the first three bytes of
+`node_modules/dsh-plugin-doubao/package.json` and restart DSH.
+
 **Also available — a standalone command / double-click launcher.** The package ships a
 `dsh-plugin-doubao` command and a `bin/login.bat` that open the same QR in a browser.
 Use these if the DSH panel is unavailable or you are signing in before DSH is installed.
@@ -216,8 +224,17 @@ All optional. Set them in the profile's `cordis.patch.yml` entry for `dsh-plugin
 | `allowBridge` | `true` | Try plain HTTPS first and fall back to the signed client bridge on `710022004`. Set `false` for direct-only — the client is never probed or launched. |
 | `riskTtlMs` | `1800000` | How long (ms) a `710022004` flag keeps routing through the bridge before the direct path is tried again. |
 
-Environment: `DOUBAO_CREDENTIALS` overrides the credential path, `DOUBAO_LOGIN_PORT` the login port,
-`DSH_HOME` the base directory.
+Environment, all optional:
+
+| Variable | Read by | What it does |
+| --- | --- | --- |
+| `DSH_HOME` | everything | Base directory; the credential file lives under it. Defaults to `~/.dsh`. |
+| `DOUBAO_CREDENTIALS` | the provider | Overrides `credentialsPath` when the config key is unset. |
+| `DOUBAO_LOGIN_PORT` | `bin/login.js` only | Port for the standalone QR page. The in-session panel uses the `loginPort` config key instead, because a plugin cannot pick a port for a server it does not own. |
+| `DOUBAO_UA` | `lib/doubao.js` | Overrides the chat request's User-Agent. The default claims the Windows client; set this on macOS/Linux if the risk engine ever starts looking at it. |
+| `DOUBAO_LOGIN_UA` | `lib/login.js` | Overrides the User-Agent used during the QR/passport flow. |
+| `DOUBAO_CHANNEL` | `lib/doubao.js` | Overrides the `channel` query parameter (default `win`). |
+| `DOUBAO_TZ` | `lib/doubao.js` | Overrides the `tz_name` query parameter (default: the process's own time zone). |
 
 ## Rate limiting
 
@@ -454,13 +471,30 @@ Three details are deliberate:
 ## Development
 
 ```bash
-node --test test/plugin.test.mjs    # protocol, framing, pacer, identity, credentials
-node --test test/apply.test.mjs     # wiring into a cordis context
-node --test test/credits.test.mjs   # quota parsing and the loopback credits route
+npm test                            # all 138 tests, no arguments needed
 ```
 
-Pass the file, not the directory: `node --test test/` is treated as a module path and fails with
-`Cannot find module`.
+`npm test` runs `node --test` with no path, so Node discovers `test/*.test.mjs` itself. Naming the
+files explicitly also works:
+
+```bash
+node --test test/plugin.test.mjs    # protocol, framing, pacer, identity, credentials
+node --test test/apply.test.mjs     # wiring into a cordis context
+node --test test/login.test.mjs     # QR flow, cookie harvest, credential storage
+node --test test/login-routes.test.mjs  # the three loopback sign-in routes
+node --test test/credits.test.mjs   # quota parsing and the loopback credits route
+node --test test/manifest.test.mjs  # packaging: no BOM, strict JSON, files whitelist
+```
+
+Pass a file, or nothing — not the directory: `node --test test/` is treated as a module path and
+fails with `Cannot find module`.
+
+`manifest.test.mjs` also runs as `prepack`, so `npm pack` and `npm publish` refuse to build a tarball
+whose `package.json` would not parse. That is the one failure mode that ships cleanly, installs
+cleanly, and then leaves the plugin invisible with nothing in the log — see the 0.2.5 note above.
+
+Pass a file, or nothing — not the directory: `node --test test/` is treated as a module path and
+fails with `Cannot find module`.
 
 The identity reader can be checked against the real client on this machine:
 
