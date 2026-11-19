@@ -96,15 +96,35 @@ owns that profile). Add the dependency to the profile's `package.json` by hand a
 
 and add `"dsh-plugin-doubao"` to `dsh.profile.bundles` in the same file.
 
-## Sign in
+## Sign in — no conversation needed
 
-`node bin/login.js` (from the checked-out repository) prints a URL, serves a QR code there, and exits once you have scanned it.
+Signing in is a standalone step. You do **not** need to start DSH or chat with the agent first
+(in fact you can't: until you sign in, every Doubao request fails with `AUTH_MISSING`). The
+package ships a `dsh-plugin-doubao` command that opens a local sign-in page, shows a QR code,
+and saves the session as soon as you scan it.
 
-**Scan with the Douyin app (抖音), not the Doubao app.** Doubao's own sign-in page says this, and
-scanning with Doubao simply fails with no useful error.
+**Windows — double-click:** `bin/login.bat` in the cloned repo, or
+`node_modules\dsh-plugin-doubao\bin\login.bat` inside your DSH profile directory. It finds
+Node by itself, opens the browser, and waits for the scan.
 
-Inside a running DSH session you can also just ask the agent to call the `doubao` service, or open
-`http://127.0.0.1:8899/` after starting login.
+**Any OS — terminal:**
+
+```bash
+dsh-plugin-doubao            # opens the browser at http://127.0.0.1:8899/
+dsh-plugin-doubao --status   # check whether you're signed in and when it expires
+dsh-plugin-doubao --force    # sign in again (the normal run is a no-op if already signed in)
+dsh-plugin-doubao --port 9001 --no-open   # custom port / don't launch a browser
+```
+
+From a checkout, `node bin/login.js` accepts the same flags. Once the page opens, **scan with
+the Douyin app (抖音), not the Doubao app** — Doubao's own QR page says so, and scanning with
+Doubao fails silently. The QR refreshes automatically every ~60 s, so take your time. When it
+succeeds the page says `saved`, the command prints the credential path, and you can go straight
+to DSH and pick a Doubao model. No restart, no chat, no agent round-trip.
+
+The sign-in needs the device fingerprint from a Doubao desktop client that has been signed in
+at least once on this machine — see [Prerequisites](#prerequisites--read-this-first). If that
+client is missing, the command tells you exactly which paths it looked in and exits.
 
 ## One thing you should know before installing
 
