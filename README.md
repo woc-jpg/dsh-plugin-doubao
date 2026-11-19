@@ -116,6 +116,8 @@ QR code — no browser, no file manager, no command line. Scan it with the Douyi
 the button turns green, and you can start picking Doubao models right away. The modal
 shows the live scan status and a **重新扫码 / Re-scan** button if the code expires.
 
+![The sign-in panel, in DSH's light and dark themes](docs/login-modal.png)
+
 Already signed in? The panel says **已经登录 / Already signed in** and shows no QR. That
 is deliberate: a QR for an account that is already connected only invites a pointless
 second scan. Use **重新扫码 / Re-scan** if you want to switch accounts.
