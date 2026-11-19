@@ -44,6 +44,18 @@ first lookup (or if it fails). A failed lookup returns "nothing new" instead of 
 so a fresher rate is never rolled back to an older one. `Doubao` and `Doubao Expert` have no tag in
 the client's own list and are shown without a suffix.
 
+## Prerequisites — read this first
+
+The plugin is not standalone. All four must hold, or the install succeeds but
+sign-in fails:
+
+1. **DSH** — this is a DSH provider, not a standalone app.
+2. **The Doubao desktop client, installed and signed in at least once on the same machine that runs DSH.** Doubao checks a device fingerprint on every request and only accepts one this account has used before. There is no API to get it: the plugin reads it from the client's `Local State`, and a freshly generated device id is always refused (`710022004`). Windows, macOS and Linux are supported, a non-default install path is fine, and the client does not need to stay running — it only has to have been signed in once.
+3. **The Douyin app (抖音) on your phone** — sign-in is a QR scan and must be done with Douyin, not the Doubao app (which fails silently). Scan on the machine that runs DSH; signing in elsewhere does not carry over.
+4. **A Doubao account with available credit** — a fresh free account starts with 9,000 monthly + 2,000 activity points.
+
+Without #2, `node bin/login.js` prints `No Doubao desktop client identity found on this machine.` and exits. See [One thing you should know before installing](#one-thing-you-should-know-before-installing) for how the fingerprint is read and when the client is actually needed.
+
 ## Install
 
 Install from this repository. There is deliberately **no npm release** — do not use
