@@ -173,22 +173,37 @@ test('the catalog satisfies the host model contract', async () => {
     const efforts = info.reasoning.efforts
     assert.equal(new Set(efforts.map((e) => e.id)).size, efforts.length, 'effort ids must be unique')
     assert.ok(efforts.some((e) => e.id === info.reasoning.defaultEffort), 'defaultEffort must exist')
-    const wire = MODELS.find((m) => m.id === id)
-    if (wire.modeId === '1') {
-      assert.ok(efforts.some((e) => e.id === 'high'), `${id} is a chat model and must offer High`)
-    } else {
-      assert.deepEqual(efforts.map((e) => e.id), ['off'], `${id} is routed, so a High switch would do nothing`)
-    }
   }
 })
 
-test('a routed model rejects a High effort instead of silently ignoring it', async () => {
+test('every model offers its own thinking tiers, not one shared High switch', async () => {
   const adapter = createAdapter({ loadCredentials: async () => undefined })
-  const info = await adapter.resolveModel(DEFAULT_PROVIDER, 'glm-5.3-flash')
-  assert.deepEqual(info.reasoning.efforts.map((e) => e.id), ['off'])
-  // The dsh-llm layer validates against these efforts; a routed model has no
-  // High choice, so asking for one would be rejected as UNSUPPORTED_REASONING_EFFORT.
-  assert.ok(!info.reasoning.efforts.some((e) => e.id === 'high'))
+  // The service numbers the tiers per model, so the offered ids differ by model.
+  // GLM lists 3/5/7 and Qwen lists 3/5/6; a fixed ladder would either offer a
+  // level the model rejects or hide one it accepts.
+  const glm = await adapter.resolveModel(DEFAULT_PROVIDER, 'glm-5.3-flash')
+  assert.deepEqual(glm.reasoning.efforts.map((e) => e.id), ['off', 'low', 'high', 'max'])
+
+  const qwen = await adapter.resolveModel(DEFAULT_PROVIDER, 'qwen4-max')
+  assert.deepEqual(qwen.reasoning.efforts.map((e) => e.id), ['off', 'low', 'high', 'xhigh'])
+
+  const flash = await adapter.resolveModel(DEFAULT_PROVIDER, 'deepseek-v4.1-flash')
+  assert.deepEqual(flash.reasoning.efforts.map((e) => e.id), ['off', 'low', 'medium', 'high', 'xhigh', 'max'])
+
+  // Every model still offers Off, so a saved call that passes it validates.
+  for (const { id } of MODELS) {
+    const info = await adapter.resolveModel(DEFAULT_PROVIDER, id)
+    assert.ok(info.reasoning.efforts.some((e) => e.id === 'off'), `${id} must offer Off`)
+    assert.ok(info.reasoning.efforts.length > 1, `${id} must offer at least one thinking tier`)
+  }
+})
+
+test('the context window comes from the model, not one global constant', async () => {
+  const adapter = createAdapter({ loadCredentials: async () => undefined })
+  const chat = await adapter.resolveModel(DEFAULT_PROVIDER, 'doubao')
+  const routed = await adapter.resolveModel(DEFAULT_PROVIDER, 'deepseek-v4-pro')
+  assert.equal(chat.context.contextWindow, 131_072)
+  assert.equal(routed.context.contextWindow, 300_000)
 })
 
 test('providerInfo agrees with the provider id it is asked about', () => {
@@ -242,7 +257,8 @@ test('the catalog shows the last known rate on the name, not the description', a
     }
   }
   const resolved = await adapter.resolveModel(DEFAULT_PROVIDER, 'doubao-2.1-pro')
-  assert.equal(resolved.name, `Doubao 2.1 Pro${RATE_SEPARATOR}x0.65`)
+  const proName = MODELS.find((m) => m.id === 'doubao-2.1-pro').name
+  assert.equal(resolved.name, `${proName}${RATE_SEPARATOR}x0.65`)
   const prepared = await adapter.prepareCall(DEFAULT_PROVIDER, 'doubao-2.1-pro')
   assert.equal(prepared.model.name, resolved.name, 'prepareCall must carry the same display name')
 })
@@ -255,10 +271,14 @@ test('a live rate lookup replaces the fallback table once', async () => {
       calls += 1
       return { '5': 'x0.42' }
     },
+    // The catalog shares the same brief in production; here it must not reach the
+    // network, so it answers "nothing new" and the shipped reading stays.
+    fetchCatalog: async () => undefined,
   })
+  const proName = MODELS.find((m) => m.id === 'doubao-2.1-pro').name
   const first = await adapter.listModels()
   assert.equal(calls, 1)
-  assert.equal(first.find((m) => m.id === 'doubao-2.1-pro').name, 'Doubao 2.1 Pro · x0.42')
+  assert.equal(first.find((m) => m.id === 'doubao-2.1-pro').name, `${proName}${RATE_SEPARATOR}x0.42`)
   assert.deepEqual(adapter.currentRates(), { '5': 'x0.42' })
 
   // A second call inside the ten-minute window must not hit the endpoint again:
@@ -266,6 +286,20 @@ test('a live rate lookup replaces the fallback table once', async () => {
   await adapter.resolveModel(DEFAULT_PROVIDER, 'doubao-2.1-pro')
   await adapter.prepareCall(DEFAULT_PROVIDER, 'doubao-2.1-pro')
   assert.equal(calls, 1)
+})
+
+test('a live catalog replaces the shipped reading, model list included', async () => {
+  const adapter = createAdapter({
+    loadCredentials: async () => ({ cookies: 'a=b', identity: IDENTITY }),
+    fetchRates: async () => ({}),
+    fetchCatalog: async () => [
+      { id: 'brand-new', key: 'person-brand-new', name: 'Brand New', modeId: '3', agentMode: 1, convMode: 3, effort: 5, levels: [3, 5], description: 'Newly added.' },
+    ],
+  })
+  const models = await adapter.listModels()
+  assert.deepEqual(models.map((m) => m.id), ['brand-new'])
+  const info = await adapter.resolveModel(DEFAULT_PROVIDER, 'brand-new')
+  assert.deepEqual(info.reasoning.efforts.map((e) => e.id), ['off', 'low', 'high'])
 })
 
 test('a failed rate lookup keeps the picker informative', async () => {

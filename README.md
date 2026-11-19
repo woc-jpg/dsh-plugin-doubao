@@ -7,28 +7,61 @@ provider. Install the plugin, sign in once by scanning a QR code with the Douyin
 There is no proxy to start and no browser to drive. The plugin speaks the same HTTP endpoints the
 web client uses, from inside the harness process.
 
-Every model the client can route to is exposed, with the same names the client shows:
+The model list is read from the client's own menu payload, not shipped as a table:
+
+- `POST /alice/slot/action_bar_v3/brief_list` returns the rows behind the model picker, each carrying
+  its wire key (`model_item_key`), its display name, the surface it belongs to (`default_mode`), the
+  context window (`model_extra_params.total_window_size`) and `reasoning_effort_config.option_list` —
+  the thinking tiers that model actually accepts.
+- A model Doubao adds shows up without a release; one it retires disappears on its own. The twelve rows
+  below were the whole list on 2026-11-19; the live list the same day also carried `qwen4-max`,
+  `qwen3.8-max` and `qwen3.8-flash`.
+- Before sign-in (and whenever the endpoint is unreachable) the shipped reading is used, so the picker
+  is never empty.
+
+The reading taken on 2026-11-19:
 
 ```
-doubao                      Doubao
-doubao-expert               Doubao Expert
-doubao-auto                 Doubao Auto
-doubao-2.1-lite             Doubao 2.1 Lite
-doubao-2.1-pro              Doubao 2.1 Pro
-deepseek-v4.1-flash         DeepSeek V4.1 Flash
-deepseek-v4-pro             DeepSeek V4 Pro
-kimi-k3.1-pro               Kimi K3.1 Pro
-kimi-k3.1-pro-highspeed     Kimi K3.1 Pro Highspeed
-kimi-k3                      Kimi K3
-glm-5.3                     GLM 5.3
-glm-5.3-flash               GLM 5.3 Flash
+doubao                     快速
+doubao-expert              专家
+doubao-auto                自动
+doubao-2.1-lite            豆包 2.1 Lite
+doubao-2.1-pro             豆包 2.1 Pro
+deepseek-v4.1-flash        DeepSeek V4.1 Flash
+deepseek-v4-pro            DeepSeek V4 Pro
+kimi-k3.1-pro              Kimi K3.1 Pro
+kimi-k3.1-pro-highspeed    Kimi K3.1 Pro 高速
+kimi-k3                     Kimi K3
+glm-5.3                    GLM 5.3
+glm-5.3-flash              GLM 5.3 Flash
+qwen4-max                  Qwen 4 Max
+qwen3.8-max                Qwen 3.8 Max
+qwen3.8-flash              Qwen 3.8 Flash
 ```
 
 Picking one is not just a name. The client sends a five-tuple — `model_item_key`, `mode_id`,
 `agent_mode`, `conversation_mode`, `reasoning_effort` (plus a thinking-mode id) — and repeats it in
 three places in the request body. The server reads whichever copy it wants, so a field left at the
-default silently answers from the plain chat model instead of the one you picked. All twelve are
-verified against a live account.
+default silently answers from the plain chat model instead of the one you picked.
+
+### Thinking depth: every model's own tiers
+
+Doubao numbers its thinking tiers per model and the ladders do not match:
+
+| models | tiers | wire levels |
+| --- | --- | --- |
+| `doubao`, `doubao-expert`, `doubao-auto`, `doubao-2.1-*` | 低 / 中 / 高 | 3 / 4 / 5 |
+| `deepseek-v4.1-flash`, `deepseek-v4-pro`, `kimi-*` | 低 / 中 / 高 / 极高 / 最高 | 3 / 4 / 5 / 6 / 7 |
+| `glm-5.3`, `glm-5.3-flash` | 低 / 高 / 最高 | **3 / 5 / 7** |
+| `qwen4-max`, `qwen3.8-*` | 低 / 高 / 极高 | **3 / 5 / 6** |
+
+The harness effort ids map onto that ladder one-to-one — `low`/`medium`/`high`/`xhigh`/`max` are levels
+3/4/5/6/7 — and each model advertises only the ids its own row lists. Asking GLM 5.3 for `medium`
+therefore is not an option the picker offers, because the service does not have a level 4 for it.
+
+The level travels to the wire as a number in `model_config.reasoning_effort` and as a string in the two
+other copies of the same field; `model_extra_params` (`memory_profile`, `total_window_size`) is
+forwarded verbatim, which is what tells the service how much memory to reserve.
 
 ### Credit multipliers
 
@@ -458,12 +491,15 @@ Three details are deliberate:
   text instead of a call. Turns with no tools configured are byte-for-byte unchanged.
 - **Token counts are estimates.** The endpoint returns no usage block, so counts are derived from
   character length (roughly two characters per token). Good enough for a meter, not for billing.
-- **The thinking toggle only reaches the chat models.** `doubao` and `doubao-expert` take a
-  `need_deep_think` flag, so the harness reasoning setting applies to them and they expose Off/High.
-  For the routed models the thinking depth is part of the model definition — `GLM 5.3` is not `GLM 5.3`
-  with thinking off — so the flag is fixed. Those models advertise only the Off effort rather than a
-  High switch that would silently do nothing; a stale High request is rejected as unsupported instead
-  of being quietly ignored.
+- **The thinking toggle reaches the chat models; the routed ones take a level instead.** `doubao` and
+  `doubao-expert` take a `need_deep_think` flag, so the harness reasoning setting turns their thinking
+  pass on and off. The routed models carry depth as the numeric `reasoning_effort` level, which the
+  adapter sends as whatever tier you picked — a real, measured difference in time and answer length on
+  a hard question, not a no-op switch.
+- **Not every tier exists on every model.** The service lists the tiers per model (GLM has 3/5/7, Qwen
+  3/5/6), so the picker offers exactly those. A tier id a model does not list is refused by the harness
+  before any request goes out, and the adapter falls back to that model's default level rather than
+  sending a number the service would reject.
 - **No conversation continuity.** Each turn is a fresh conversation on Doubao's side, because the
   endpoint is stateless per request and passing a conversation id back would require server-side state
   the harness does not give the adapter.
@@ -471,7 +507,7 @@ Three details are deliberate:
 ## Development
 
 ```bash
-npm test                            # all 138 tests, no arguments needed
+npm test                            # all 150 tests, no arguments needed
 ```
 
 `npm test` runs `node --test` with no path, so Node discovers `test/*.test.mjs` itself. Naming the
@@ -479,6 +515,7 @@ files explicitly also works:
 
 ```bash
 node --test test/plugin.test.mjs    # protocol, framing, pacer, identity, credentials
+node --test test/catalog.test.mjs   # model rows read from the menu payload, tiers, wire level
 node --test test/apply.test.mjs     # wiring into a cordis context
 node --test test/login.test.mjs     # QR flow, cookie harvest, credential storage
 node --test test/login-routes.test.mjs  # the three loopback sign-in routes
@@ -493,9 +530,6 @@ fails with `Cannot find module`.
 whose `package.json` would not parse. That is the one failure mode that ships cleanly, installs
 cleanly, and then leaves the plugin invisible with nothing in the log — see the 0.2.5 note above.
 
-Pass a file, or nothing — not the directory: `node --test test/` is treated as a module path and
-fails with `Cannot find module`.
-
 The identity reader can be checked against the real client on this machine:
 
 ```bash
@@ -506,11 +540,12 @@ node -e "import('./lib/identity.js').then(m => console.log(m.toIdentity(m.findCl
 
 | File | Role |
 | --- | --- |
+| `lib/catalog.js` | The model rows read from Doubao's own menu payload: ids, names, surfaces, context windows, per-model thinking tiers. |
 | `lib/doubao.js` | The wire protocol: query/body shaping, SSE framing, thinking/answer attribution, the turn pacer. |
 | `lib/bridge.js` | The signed-request bridge: drives the running client over the DevTools protocol. |
 | `lib/identity.js` | Reads `device_id` and friends out of the installed client's `Local State`. |
 | `lib/adapter.js` | The LLM provider: model catalog, stream mapping, error mapping. |
-| `lib/rates.js` | Reads the credit multipliers from Doubao's model-list endpoint. |
+| `lib/rates.js` | Fetches Doubao's menu payload once and reads the credit multipliers out of it. |
 | `lib/credits.js` | Reads the remaining credit from Doubao's quota-summary endpoint. |
 | `lib/client.js` | The browser half: the credit readout in `conversation.input.right`. |
 | `lib/login.js` | QR sign-in page, cookie harvest, credential storage. |

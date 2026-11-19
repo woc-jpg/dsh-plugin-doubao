@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-doubao",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Doubao models in DSH, self-contained: talks to doubao.com over plain HTTP and registers itself as an LLM provider. No proxy to start — sign in once with a QR code.",
   "type": "module",
   "license": "MIT",
