@@ -58,26 +58,37 @@ Without #2, `node bin/login.js` prints `No Doubao desktop client identity found 
 
 ## Install
 
-Install from this repository. There is deliberately **no npm release** — do not use
-`npx dsh-plugin-doubao`, because that asks the npm registry for a package that is not
-there. `pnpm` resolves a git URL directly, and the login helper is run from the checked-out
-repository:
+### One line — paste this
 
 ```bash
-git clone https://github.com/woc-jpg/dsh-plugin-doubao.git
-cd dsh-plugin-doubao
 dsh plugin --profile web add github:woc-jpg/dsh-plugin-doubao
-node bin/login.js
 ```
 
-`dsh plugin add` installs the package and
-activates it as a profile bundle automatically (the package declares `dsh.bundle.patch`). Restart
-DSH, then choose a Doubao model. The login step is only needed once; the session is cached in
-`~/.dsh/doubao-local/credentials.json`.
+Then restart DSH, pick a Doubao model, and (first time only) sign in with the helper
+bundled inside the installed package:
 
-If your DSH profile is the desktop app's, `dsh plugin` refuses to touch it (the Electron app owns
-that profile). Add the dependency to the profile's `package.json` by hand and run `pnpm install`
-there instead:
+```bash
+node "$(dsh plugin --profile web exec pwd)/node_modules/dsh-plugin-doubao/bin/login.js"
+```
+
+If that path lookup is awkward on your shell, the same helper is at
+`~/.dsh/profiles/<profile>/node_modules/dsh-plugin-doubao/bin/login.js` — or just clone
+the repo and run `node bin/login.js` from it.
+
+**Use `github:woc-jpg/dsh-plugin-doubao` exactly as written.** Do not paste the browser
+address `https://github.com/woc-jpg/dsh-plugin-doubao`: pnpm treats a bare `https://...`
+as a git dependency and runs `git ls-remote`, which stalls or fails on many networks.
+The `github:owner/repo` form downloads a codeload tarball instead and takes a few seconds.
+`woc-jpg/dsh-plugin-doubao` also works. The bare name `dsh-plugin-doubao` does **not** work
+yet — there is no npm release — so `npx dsh-plugin-doubao` is not a thing.
+
+`dsh plugin add` installs the package and activates it as a profile bundle automatically
+(the package declares `dsh.bundle.patch`). The session is cached in
+`~/.dsh/doubao-local/credentials.json`; you sign in only once.
+
+If your DSH profile is the desktop app's, `dsh plugin` refuses to touch it (the Electron app
+owns that profile). Add the dependency to the profile's `package.json` by hand and run
+`pnpm install` there instead:
 
 ```json
 "dsh-plugin-doubao": "github:woc-jpg/dsh-plugin-doubao"
