@@ -1805,3 +1805,102 @@ test('tool result messages are fed back into the next prompt', () => {
   assert.match(prompt, /\[Assistant\]/)
   assert.match(prompt, /\[Tool result\]\nhi/)
 })
+
+// ---------------------------------------------------------------- native sandbox transport
+
+// A work-surface model (agentMode 1) with tools goes through the local sandbox.
+async function* fakeNative(events) {
+  for (const event of events) yield event
+}
+
+test('native transport emits the real answer and finishes with stop (tools already ran)', async () => {
+  const adapter = createAdapter({
+    loadCredentials: async () => ({ cookies: 'a=b', identity: IDENTITY }),
+    logger: { warn() {} },
+    runNativeTask: async function* () {
+      yield { type: 'executed', call: { name: 'Bash', input: { command: 'echo hi' } }, result: { text: 'hi', isError: false } }
+      yield { type: 'delta', text: 'I ran echo and got hi.' }
+    },
+  })
+  const seen = []
+  for await (const chunk of adapter.stream({
+    model: 'deepseek-v4.1-flash',
+    tools: TOOLS,
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'run echo hi' }] }],
+  })) {
+    seen.push(chunk)
+  }
+  const text = seen.filter((c) => c.type === 'text-delta').map((c) => c.text).join('')
+  assert.equal(text, 'I ran echo and got hi.')
+  const reasoning = seen.filter((c) => c.type === 'reasoning-delta').map((c) => c.text).join('')
+  assert.match(reasoning, /Bash\(echo hi\)/, 'the executed tool is surfaced in reasoning')
+  const finish = seen.find((c) => c.type === 'finish')
+  assert.equal(finish.reason.kind, 'stop', 'tools already ran locally; never ask the host to run them again')
+  assert.ok(!seen.some((c) => c.type === 'tool-call-delta'), 'no tool-call blocks from the native path')
+  const usageAt = seen.findIndex((c) => c.type === 'usage')
+  assert.ok(usageAt >= 0 && usageAt < seen.findIndex((c) => c.type === 'finish'))
+})
+
+test('native failure falls back to the text bridge with no partial output', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = fakeFetch([
+    `event: CHUNK_DELTA\ndata: ${JSON.stringify({ text: 'bridge answer' })}\n\n`,
+    'event: SSE_REPLY_END\ndata: {"end_type":1}\n\n',
+  ])
+  try {
+    const adapter = createAdapter({
+      loadCredentials: async () => ({ cookies: 'a=b', identity: IDENTITY }),
+      logger: { warn() {} },
+      runNativeTask: async function* () {
+        yield { type: 'delta', text: 'partial that must not leak' }
+        yield { type: 'error', code: 0, message: 'sandbox channel failed' }
+      },
+    })
+    const seen = []
+    for await (const chunk of adapter.stream({
+      model: 'deepseek-v4.1-flash',
+      tools: TOOLS,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    })) {
+      seen.push(chunk)
+    }
+    const text = seen.filter((c) => c.type === 'text-delta').map((c) => c.text).join('')
+    assert.equal(text, 'bridge answer', 'the native partial answer was discarded in favour of the bridge')
+    assert.ok(!text.includes('partial that must not leak'))
+    assert.equal(seen.find((c) => c.type === 'finish').reason.kind, 'stop')
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('nativeEnabled=false keeps a work-surface model on the text bridge', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = fakeFetch([
+    `event: CHUNK_DELTA\ndata: ${JSON.stringify({ text: 'plain bridge' })}\n\n`,
+    'event: SSE_REPLY_END\ndata: {"end_type":1}\n\n',
+  ])
+  let nativeCalled = false
+  try {
+    const adapter = createAdapter({
+      loadCredentials: async () => ({ cookies: 'a=b', identity: IDENTITY }),
+      logger: { warn() {} },
+      nativeEnabled: false,
+      runNativeTask: async function* () {
+        nativeCalled = true
+        yield { type: 'delta', text: 'should not run' }
+      },
+    })
+    const seen = []
+    for await (const chunk of adapter.stream({
+      model: 'deepseek-v4.1-flash',
+      tools: TOOLS,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    })) {
+      seen.push(chunk)
+    }
+    assert.equal(nativeCalled, false)
+    assert.equal(seen.filter((c) => c.type === 'text-delta').map((c) => c.text).join(''), 'plain bridge')
+  } finally {
+    globalThis.fetch = original
+  }
+})

@@ -256,6 +256,10 @@ All optional. Set them in the profile's `cordis.patch.yml` entry for `dsh-plugin
 | `bridgePort` | `9222` | DevTools port used for the fallback client bridge, including when starting the client. |
 | `allowBridge` | `true` | Try plain HTTPS first and fall back to the signed client bridge on `710022004`. Set `false` for direct-only — the client is never probed or launched. |
 | `riskTtlMs` | `1800000` | How long (ms) a `710022004` flag keeps routing through the bridge before the direct path is tried again. |
+| `nativeEnabled` | `true` | When a turn carries tools on a work-surface model (DeepSeek/Kimi/GLM/Qwen), run it through Doubao's own local-sandbox channel so tools actually execute on this machine, instead of the model merely describing them. Falls back to the text bridge if the channel is unavailable. Set `false` to always use the text bridge. |
+| `nativeWorkspace` | process cwd | Directory the sandbox is confined to — tool calls cannot escape it. The harness request carries no cwd, so set this to the project you are working in (e.g. `D:\\path\\to\\project`). |
+| `nativePermission` | `AskOnRisk` | Sandbox permission: `AlwaysAsk`, `AskOnRisk`, or `FullAccess`. Risky commands (deletes, format, downloads-piped-to-shell, etc.) are refused locally unless `FullAccess`. |
+| `nativeHomeDir` | `~` | Home directory passed to the sandbox task. |
 
 Environment, all optional:
 
