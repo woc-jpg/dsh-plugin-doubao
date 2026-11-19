@@ -105,10 +105,20 @@ and add `"dsh-plugin-doubao"` to `dsh.profile.bundles` in the same file.
 
 ## Sign in — no conversation needed
 
-Signing in is a standalone step. You do **not** need to start DSH or chat with the agent first
-(in fact you can't: until you sign in, every Doubao request fails with `AUTH_MISSING`). The
-package ships a `dsh-plugin-doubao` command that opens a local sign-in page, shows a QR code,
-and saves the session as soon as you scan it.
+Signing in is a standalone step. You do **not** need to chat with the agent first
+(in fact you can't: until you sign in, every Doubao request fails with `AUTH_MISSING`),
+and you do not need to find any file or open a terminal.
+
+**Easiest — sign in inside DSH itself.** After installing, look at the row beside the
+message composer: there is a small **豆包登录 / Doubao sign in** button (a grey dot when
+signed out, green when signed in). Click it and a window opens **inside DSH** with the
+QR code — no browser, no file manager, no command line. Scan it with the Douyin app,
+the button turns green, and you can start picking Doubao models right away. The modal
+shows the live scan status and a **重新扫码 / Re-scan** button if the code expires.
+
+**Also available — a standalone command / double-click launcher.** The package ships a
+`dsh-plugin-doubao` command and a `bin/login.bat` that open the same QR in a browser.
+Use these if the DSH panel is unavailable or you are signing in before DSH is installed.
 
 **Windows — double-click:** `bin/login.bat` in the cloned repo, or
 `node_modules\dsh-plugin-doubao\bin\login.bat` inside your DSH profile directory. It finds
