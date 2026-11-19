@@ -61,6 +61,14 @@ Without #2, `node bin/login.js` prints `No Doubao desktop client identity found 
 ### One line — paste this
 
 ```bash
+dsh plugin --profile web add dsh-plugin-doubao
+```
+
+The package is published on npm as `dsh-plugin-doubao`, so the bare name resolves
+from the registry — no GitHub access required. If your npm registry is a mirror
+that has not synced yet, use the GitHub shorthand instead:
+
+```bash
 dsh plugin --profile web add github:woc-jpg/dsh-plugin-doubao
 ```
 
@@ -75,12 +83,11 @@ If that path lookup is awkward on your shell, the same helper is at
 `~/.dsh/profiles/<profile>/node_modules/dsh-plugin-doubao/bin/login.js` — or just clone
 the repo and run `node bin/login.js` from it.
 
-**Use `github:woc-jpg/dsh-plugin-doubao` exactly as written.** Do not paste the browser
-address `https://github.com/woc-jpg/dsh-plugin-doubao`: pnpm treats a bare `https://...`
-as a git dependency and runs `git ls-remote`, which stalls or fails on many networks.
-The `github:owner/repo` form downloads a codeload tarball instead and takes a few seconds.
-`woc-jpg/dsh-plugin-doubao` also works. The bare name `dsh-plugin-doubao` does **not** work
-yet — there is no npm release — so `npx dsh-plugin-doubao` is not a thing.
+Both `github:woc-jpg/dsh-plugin-doubao` and `woc-jpg/dsh-plugin-doubao` also work.
+Do **not** paste the browser address `https://github.com/woc-jpg/dsh-plugin-doubao`:
+pnpm treats a bare `https://...` as a git dependency and runs `git ls-remote`, which
+stalls or fails on many networks. The `github:owner/repo` form downloads a codeload
+tarball instead and takes a few seconds.
 
 `dsh plugin add` installs the package and activates it as a profile bundle automatically
 (the package declares `dsh.bundle.patch`). The session is cached in
@@ -91,7 +98,7 @@ owns that profile). Add the dependency to the profile's `package.json` by hand a
 `pnpm install` there instead:
 
 ```json
-"dsh-plugin-doubao": "github:woc-jpg/dsh-plugin-doubao"
+"dsh-plugin-doubao": "^0.2.0"
 ```
 
 and add `"dsh-plugin-doubao"` to `dsh.profile.bundles` in the same file.

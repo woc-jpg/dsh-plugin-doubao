@@ -1,6 +1,4 @@
-* text=auto eol=lf
-*.js text eol=lf
-*.mjs text eol=lf
-*.yml text eol=lf
-*.json text eol=lf
-*.md text eol=lf
+# Windows batch files must keep CRLF on checkout: cmd.exe truncates commands
+# in LF-only .bat files, which makes the sign-in launcher fail on double-click.
+*.bat text eol=crlf
+*.cmd text eol=crlf
